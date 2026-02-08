@@ -1,0 +1,43 @@
+name: FPL Auto Manager - Deadline Check
+
+# Secondary run: checks 2 hours before the actual GW deadline
+# This acts as a safety net to catch last-minute injury news
+
+on:
+  schedule:
+    # Runs Saturday at 09:30 UTC (typical 11:30 BST deadline buffer)
+    - cron: '30 9 * * 6'
+  workflow_dispatch:
+
+jobs:
+  deadline-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run deadline check
+        env:
+          FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
+          FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
+          FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
+        run: python deadline_check.py
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deadline-check-logs-${{ github.run_number }}
+          path: fpl_run_*.log
+          retention-days: 14
