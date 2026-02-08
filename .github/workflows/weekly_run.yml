@@ -40,6 +40,7 @@ jobs:
           FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
           FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
+          FPL_COOKIE: ${{ secrets.FPL_COOKIE }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python manager.py --dry-run

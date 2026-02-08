@@ -8,6 +8,9 @@ import os
 FPL_EMAIL = os.environ.get("FPL_EMAIL", "")
 FPL_PASSWORD = os.environ.get("FPL_PASSWORD", "")
 FPL_TEAM_ID = int(os.environ.get("FPL_TEAM_ID", "0"))
+# Cookie-based auth (workaround for FPL's 2024 auth changes)
+# Extract the full cookie string from your browser after logging in
+FPL_COOKIE = os.environ.get("FPL_COOKIE", "")
 
 # ─── API Endpoints ───
 BASE_URL = "https://fantasy.premierleague.com/api"

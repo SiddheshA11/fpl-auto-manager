@@ -1,84 +1,191 @@
 """
 FPL Auto Manager - API Client
-Uses the `fpl` package (amosbastian/fpl) for authentication and data fetching.
-Wraps async operations in sync functions for easier integration.
+Handles authentication via cookie injection (workaround for FPL's 2024 auth changes)
+and data fetching from the FPL API.
 """
-import asyncio
+import time
 import logging
-import aiohttp
+import requests
 import pandas as pd
-from fpl import FPL
+from http.cookies import SimpleCookie
 from config import (
-    FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID,
-    ENDPOINTS, STRATEGY,
+    FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID, FPL_COOKIE,
+    ENDPOINTS, STRATEGY, LOGIN_URL,
 )
 
 logger = logging.getLogger("fpl_auto")
 
 
 class FPLClient:
-    """Authenticated client for the Fantasy Premier League API using fpl package."""
+    """Authenticated client for the Fantasy Premier League API."""
 
     def __init__(self):
+        self.session = requests.Session()
+        # Use realistic browser headers
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Accept-Language": "en-GB,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://fantasy.premierleague.com/",
+            "Origin": "https://fantasy.premierleague.com",
+        })
         self.authenticated = False
-        self._session = None
-        self._fpl = None
         self._bootstrap_cache = None
         self._fixtures_cache = None
-        self._my_team_cache = None
-
-    # ──────────────── Async Context Management ────────────────
-
-    async def _init_session(self):
-        """Initialize aiohttp session and FPL client."""
-        if self._session is None:
-            self._session = aiohttp.ClientSession()
-            self._fpl = FPL(self._session)
-        return self._fpl
-
-    async def _close_session(self):
-        """Close the aiohttp session."""
-        if self._session:
-            await self._session.close()
-            self._session = None
-            self._fpl = None
 
     # ──────────────── Authentication ────────────────
 
-    async def _login_async(self) -> bool:
-        """Authenticate with FPL using the fpl package."""
+    def login(self) -> bool:
+        """
+        Authenticate with FPL.
+        
+        Primary method: Cookie injection (FPL_COOKIE environment variable)
+        Fallback: Email/password login (may not work due to FPL's 2024 auth changes)
+        """
+        # Method 1: Cookie-based authentication (recommended)
+        if FPL_COOKIE:
+            logger.info("Using cookie-based authentication...")
+            return self._login_with_cookie()
+        
+        # Method 2: Email/Password (may fail due to FPL's 2024 auth changes)
+        if FPL_EMAIL and FPL_PASSWORD:
+            logger.info("Using email/password authentication...")
+            return self._login_with_credentials()
+        
+        logger.error("No authentication credentials provided. "
+                    "Set FPL_COOKIE (recommended) or FPL_EMAIL+FPL_PASSWORD.")
+        return False
+
+    def _login_with_cookie(self) -> bool:
+        """Authenticate by injecting cookies from browser session."""
         try:
-            fpl = await self._init_session()
-            await fpl.login(email=FPL_EMAIL, password=FPL_PASSWORD)
-            self.authenticated = True
-            logger.info("Successfully authenticated with FPL.")
-            return True
+            # Parse the cookie string
+            cookie = SimpleCookie()
+            cookie.load(FPL_COOKIE)
+            
+            # Add cookies to session
+            for key, morsel in cookie.items():
+                self.session.cookies.set(key, morsel.value, domain=".premierleague.com")
+            
+            # Also handle simpler cookie format (key=value; key2=value2)
+            if not cookie.items():
+                for item in FPL_COOKIE.split(';'):
+                    item = item.strip()
+                    if '=' in item:
+                        key, value = item.split('=', 1)
+                        self.session.cookies.set(key.strip(), value.strip(), 
+                                                domain=".premierleague.com")
+            
+            # Verify the cookies work by making an authenticated request
+            verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
+            resp = self.session.get(verify_url)
+            
+            if resp.status_code == 200:
+                self.authenticated = True
+                logger.info("Successfully authenticated with cookies.")
+                return True
+            else:
+                logger.error(f"Cookie authentication failed. API returned {resp.status_code}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Authentication failed: {e}")
+            logger.error(f"Cookie authentication failed: {e}")
             return False
 
-    def login(self) -> bool:
-        """Synchronous wrapper for login."""
-        return asyncio.get_event_loop().run_until_complete(self._login_async())
+    def _login_with_credentials(self) -> bool:
+        """
+        Authenticate with email/password.
+        Note: This may not work due to FPL's 2024 authentication changes.
+        Use cookie-based auth instead.
+        """
+        try:
+            # Get the login page first
+            login_page = self.session.get(LOGIN_URL)
+            
+            # Submit credentials
+            payload = {
+                "login": FPL_EMAIL,
+                "password": FPL_PASSWORD,
+                "redirect_uri": "https://fantasy.premierleague.com/",
+                "app": "plfpl-web",
+            }
+            
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": LOGIN_URL,
+            }
+            
+            resp = self.session.post(LOGIN_URL, data=payload, headers=headers, 
+                                    allow_redirects=True)
+            
+            # Check for pl_profile cookie
+            cookies = self.session.cookies.get_dict()
+            if "pl_profile" in cookies:
+                # Verify with API call
+                verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
+                verify_resp = self.session.get(verify_url)
+                
+                if verify_resp.status_code == 200:
+                    self.authenticated = True
+                    logger.info("Successfully authenticated with email/password.")
+                    return True
+            
+            logger.error("Email/password authentication failed. "
+                        "This is likely due to FPL's 2024 auth changes. "
+                        "Please use cookie-based authentication instead.")
+            logger.error("To get cookies: Log in to FPL in your browser, open DevTools (F12), "
+                        "go to Network tab, find any request to fantasy.premierleague.com, "
+                        "copy the Cookie header value, and set it as FPL_COOKIE secret.")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Email/password authentication failed: {e}")
+            return False
+
+    def _get(self, url: str, auth_required: bool = False) -> dict | list | None:
+        """GET request with throttling and error handling."""
+        if auth_required and not self.authenticated:
+            raise RuntimeError("This endpoint requires authentication. Call login() first.")
+        time.sleep(STRATEGY["request_delay"])
+        try:
+            resp = self.session.get(url)
+            resp.raise_for_status()
+            return resp.json()
+        except requests.RequestException as e:
+            logger.error(f"GET {url} failed: {e}")
+            return None
+
+    def _post(self, url: str, payload: dict) -> dict | None:
+        """POST request (always requires auth)."""
+        if not self.authenticated:
+            raise RuntimeError("POST requires authentication. Call login() first.")
+        time.sleep(STRATEGY["request_delay"])
+
+        # We need the csrftoken for POST requests
+        csrf = self.session.cookies.get("csrftoken", "")
+        headers = {
+            "Content-Type": "application/json",
+            "X-CSRFToken": csrf,
+            "Referer": "https://fantasy.premierleague.com/transfers",
+        }
+        try:
+            resp = self.session.post(url, json=payload, headers=headers)
+            resp.raise_for_status()
+            return resp.json() if resp.content else {"status": "ok"}
+        except requests.RequestException as e:
+            logger.error(f"POST {url} failed: {e}")
+            logger.error(f"Response body: {getattr(e.response, 'text', 'N/A')}")
+            return None
 
     # ──────────────── Public Data ────────────────
 
-    async def _get_bootstrap_async(self) -> dict:
+    def get_bootstrap(self) -> dict:
         """Fetch the master data blob (players, teams, gameweeks)."""
         if self._bootstrap_cache is None:
-            fpl = await self._init_session()
-            # The fpl package loads bootstrap data on init
-            self._bootstrap_cache = {
-                "elements": list(fpl.elements.values()),
-                "teams": list(fpl.teams.values()),
-                "events": list(fpl.events.values()),
-                "element_types": list(fpl.element_types.values()),
-            }
+            self._bootstrap_cache = self._get(ENDPOINTS["bootstrap"])
         return self._bootstrap_cache
-
-    def get_bootstrap(self) -> dict:
-        """Synchronous wrapper for bootstrap data."""
-        return asyncio.get_event_loop().run_until_complete(self._get_bootstrap_async())
 
     def get_players_df(self) -> pd.DataFrame:
         """Return all players as a DataFrame with useful columns."""
@@ -91,8 +198,7 @@ class FPLClient:
         players["ppg_numeric"] = pd.to_numeric(players["points_per_game"], errors="coerce").fillna(0)
         players["ict_numeric"] = pd.to_numeric(players["ict_index"], errors="coerce").fillna(0)
         # Minutes reliability (fraction of possible minutes played)
-        events = data["events"]
-        max_minutes = max((e.get("id", 0) for e in events), default=1) * 90
+        max_minutes = data["events"][-1]["id"] * 90 if data["events"] else 1
         players["minutes_frac"] = players["minutes"].clip(upper=max_minutes) / max(max_minutes, 1)
         return players
 
@@ -107,11 +213,11 @@ class FPLClient:
         """Return the current (or next upcoming) gameweek."""
         events = self.get_events()
         for ev in events:
-            if ev.get("is_current"):
+            if ev["is_current"]:
                 return ev
         # If none is current, find the next one
         for ev in events:
-            if ev.get("is_next"):
+            if ev["is_next"]:
                 return ev
         return events[-1] if events else None
 
@@ -119,22 +225,17 @@ class FPLClient:
         """Return the next gameweek (the one transfers apply to)."""
         events = self.get_events()
         for ev in events:
-            if ev.get("is_next"):
+            if ev["is_next"]:
                 return ev
         # If season is over
         return None
 
-    async def _get_fixtures_async(self) -> pd.DataFrame:
+    def get_fixtures(self) -> pd.DataFrame:
         """All fixtures for the season."""
         if self._fixtures_cache is None:
-            fpl = await self._init_session()
-            fixtures = await fpl.get_fixtures(return_json=True)
-            self._fixtures_cache = pd.DataFrame(fixtures) if fixtures else pd.DataFrame()
+            data = self._get(ENDPOINTS["fixtures"])
+            self._fixtures_cache = pd.DataFrame(data) if data else pd.DataFrame()
         return self._fixtures_cache
-
-    def get_fixtures(self) -> pd.DataFrame:
-        """Synchronous wrapper for fixtures."""
-        return asyncio.get_event_loop().run_until_complete(self._get_fixtures_async())
 
     def get_fixtures_for_event(self, event_id: int) -> pd.DataFrame:
         """Fixtures for a specific gameweek."""
@@ -143,113 +244,37 @@ class FPLClient:
             return all_fixtures
         return all_fixtures[all_fixtures["event"] == event_id]
 
-    async def _get_player_detail_async(self, element_id: int) -> dict | None:
-        """Detailed player history + upcoming fixtures."""
-        try:
-            fpl = await self._init_session()
-            summary = await fpl.get_player_summary(element_id, return_json=True)
-            return summary
-        except Exception as e:
-            logger.error(f"Failed to get player detail for {element_id}: {e}")
-            return None
-
     def get_player_detail(self, element_id: int) -> dict | None:
-        """Synchronous wrapper for player detail."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._get_player_detail_async(element_id)
-        )
-
-    async def _get_live_event_async(self, event_id: int) -> dict | None:
-        """Live stats for a gameweek."""
-        try:
-            fpl = await self._init_session()
-            gameweeks = await fpl.get_gameweeks([event_id], return_json=True)
-            return gameweeks[0] if gameweeks else None
-        except Exception as e:
-            logger.error(f"Failed to get live event {event_id}: {e}")
-            return None
+        """Detailed player history + upcoming fixtures."""
+        url = ENDPOINTS["element_summary"].format(element_id=element_id)
+        return self._get(url)
 
     def get_live_event(self, event_id: int) -> dict | None:
-        """Synchronous wrapper for live event data."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._get_live_event_async(event_id)
-        )
+        """Live stats for a gameweek."""
+        url = ENDPOINTS["event_live"].format(event_id=event_id)
+        return self._get(url)
 
     # ──────────────── Authenticated - My Team ────────────────
 
-    async def _get_my_team_async(self) -> dict | None:
-        """Get current squad, picks, budget, chips."""
-        if not self.authenticated:
-            raise RuntimeError("Authentication required. Call login() first.")
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID)
-            team = await user.get_team()
-            
-            # Get transfers info
-            transfers_info = await user.get_transfers_status()
-            
-            # Build response similar to API format
-            self._my_team_cache = {
-                "picks": [{"element": p.id, "position": i+1} for i, p in enumerate(team)],
-                "transfers": {
-                    "bank": transfers_info.get("bank", 0),
-                    "limit": transfers_info.get("limit", 1),
-                },
-                "chips": await user.get_chips_status() if hasattr(user, 'get_chips_status') else [],
-            }
-            return self._my_team_cache
-        except Exception as e:
-            logger.error(f"Failed to get team data: {e}")
-            return None
-
     def get_my_team(self) -> dict | None:
-        """Synchronous wrapper for my team."""
-        return asyncio.get_event_loop().run_until_complete(self._get_my_team_async())
-
-    async def _get_my_history_async(self) -> dict | None:
-        """Season history for the authenticated manager."""
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID)
-            history = await user.get_history()
-            return history
-        except Exception as e:
-            logger.error(f"Failed to get history: {e}")
-            return None
+        """Get current squad, picks, budget, chips."""
+        url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
+        return self._get(url, auth_required=True)
 
     def get_my_history(self) -> dict | None:
-        """Synchronous wrapper for my history."""
-        return asyncio.get_event_loop().run_until_complete(self._get_my_history_async())
-
-    async def _get_my_entry_async(self) -> dict | None:
-        """Public entry info (leagues, overall rank, etc.)."""
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID, return_json=True)
-            return user
-        except Exception as e:
-            logger.error(f"Failed to get entry: {e}")
-            return None
+        """Season history for the authenticated manager."""
+        url = ENDPOINTS["entry_history"].format(manager_id=FPL_TEAM_ID)
+        return self._get(url)
 
     def get_my_entry(self) -> dict | None:
-        """Synchronous wrapper for my entry."""
-        return asyncio.get_event_loop().run_until_complete(self._get_my_entry_async())
-
-    async def _get_my_transfers_async(self) -> list | None:
-        """All transfers made this season."""
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID)
-            transfers = await user.get_transfers()
-            return transfers
-        except Exception as e:
-            logger.error(f"Failed to get transfers: {e}")
-            return None
+        """Public entry info (leagues, overall rank, etc.)."""
+        url = ENDPOINTS["entry"].format(manager_id=FPL_TEAM_ID)
+        return self._get(url)
 
     def get_my_transfers(self) -> list | None:
-        """Synchronous wrapper for my transfers."""
-        return asyncio.get_event_loop().run_until_complete(self._get_my_transfers_async())
+        """All transfers made this season."""
+        url = ENDPOINTS["entry_transfers"].format(manager_id=FPL_TEAM_ID)
+        return self._get(url)
 
     def get_remaining_budget(self) -> float:
         """Remaining transfer budget in £m."""
@@ -271,73 +296,39 @@ class FPLClient:
         chips_played = {}
         if team_data and "chips" in team_data:
             for chip in team_data["chips"]:
-                if isinstance(chip, dict):
-                    chips_played[chip.get("name", "")] = chip.get("event")
+                chips_played[chip["name"]] = chip["event"]
 
         all_chips = ["wildcard", "freehit", "bboost", "3xc"]
         return {c: {"played": c in chips_played, "event": chips_played.get(c)} for c in all_chips}
 
     # ──────────────── Team Modifications ────────────────
 
-    async def _set_lineup_async(self, picks: list[dict], chip: str | None = None) -> dict | None:
+    def set_lineup(self, picks: list[dict], chip: str | None = None) -> dict | None:
         """
         Submit lineup (and optionally activate a chip).
-        Note: The fpl package may have limited support for this.
+
+        picks: list of dicts, each with keys:
+            - element (int): player id
+            - position (int): 1-11 starting, 12-15 bench
+            - is_captain (bool)
+            - is_vice_captain (bool)
+        chip: one of 'wildcard', 'freehit', 'bboost', '3xc', or None
         """
-        if not self.authenticated:
-            raise RuntimeError("Authentication required. Call login() first.")
-        
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID)
-            
-            # Use the user's method to set lineup if available
-            # The fpl package's exact method may vary
-            result = await user.set_lineup(picks, chip=chip)
-            logger.info(f"Set lineup with chip={chip}, {len(picks)} picks.")
-            return result
-        except AttributeError:
-            logger.warning("set_lineup not directly supported by fpl package, using direct API call")
-            # Fall back to direct API call
-            return await self._direct_api_set_lineup(picks, chip)
-        except Exception as e:
-            logger.error(f"Failed to set lineup: {e}")
-            return None
-
-    async def _direct_api_set_lineup(self, picks: list[dict], chip: str | None = None) -> dict | None:
-        """Direct API call to set lineup as fallback."""
-        url = f"https://fantasy.premierleague.com/api/my-team/{FPL_TEAM_ID}/"
+        url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
         payload = {"chip": chip, "picks": picks}
-        
-        try:
-            async with self._session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                else:
-                    logger.error(f"Set lineup failed: {resp.status}")
-                    return None
-        except Exception as e:
-            logger.error(f"Direct API set lineup failed: {e}")
-            return None
-
-    def set_lineup(self, picks: list[dict], chip: str | None = None) -> dict | None:
-        """Synchronous wrapper for set lineup."""
         logger.info(f"Setting lineup with chip={chip}, {len(picks)} picks.")
-        return asyncio.get_event_loop().run_until_complete(
-            self._set_lineup_async(picks, chip)
-        )
+        return self._post(url, payload)
 
-    async def _make_transfers_async(
-        self, 
-        transfers_in: list[int], 
-        transfers_out: list[int],
-        wildcard: bool = False, 
-        free_hit: bool = False
-    ) -> dict | None:
-        """Execute transfers."""
-        if not self.authenticated:
-            raise RuntimeError("Authentication required. Call login() first.")
-            
+    def make_transfers(self, transfers_in: list[int], transfers_out: list[int],
+                       wildcard: bool = False, free_hit: bool = False) -> dict | None:
+        """
+        Execute transfers.
+
+        transfers_in:  list of player IDs to buy
+        transfers_out: list of player IDs to sell (same length)
+        wildcard: activate wildcard chip
+        free_hit: activate free hit chip
+        """
         if len(transfers_in) != len(transfers_out):
             raise ValueError("transfers_in and transfers_out must be the same length.")
 
@@ -352,67 +343,19 @@ class FPLClient:
         elif free_hit:
             chip = "freehit"
 
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(FPL_TEAM_ID)
-            
-            # Try to use the user's transfer method if available
-            result = await user.make_transfers(
-                transfers_in, transfers_out, 
-                chip=chip, event=next_event["id"]
-            )
-            logger.info(f"Made {len(transfers_in)} transfer(s). Chip={chip}")
-            return result
-        except AttributeError:
-            logger.warning("make_transfers not directly supported, using direct API call")
-            return await self._direct_api_transfers(transfers_in, transfers_out, chip, next_event["id"])
-        except Exception as e:
-            logger.error(f"Failed to make transfers: {e}")
-            return None
-
-    async def _direct_api_transfers(
-        self, 
-        transfers_in: list[int], 
-        transfers_out: list[int], 
-        chip: str | None,
-        event_id: int
-    ) -> dict | None:
-        """Direct API call to make transfers as fallback."""
-        url = "https://fantasy.premierleague.com/api/transfers/"
         payload = {
             "chip": chip,
             "entry": FPL_TEAM_ID,
-            "event": event_id,
+            "event": next_event["id"],
             "transfers": [
                 {"element_in": t_in, "element_out": t_out, "purchase_price": 0, "selling_price": 0}
                 for t_in, t_out in zip(transfers_in, transfers_out)
             ],
         }
-        
-        try:
-            async with self._session.post(url, json=payload) as resp:
-                if resp.status == 200:
-                    return await resp.json() if resp.content_length else {"status": "ok"}
-                else:
-                    text = await resp.text()
-                    logger.error(f"Transfers failed: {resp.status} - {text}")
-                    return None
-        except Exception as e:
-            logger.error(f"Direct API transfers failed: {e}")
-            return None
 
-    def make_transfers(
-        self, 
-        transfers_in: list[int], 
-        transfers_out: list[int],
-        wildcard: bool = False, 
-        free_hit: bool = False
-    ) -> dict | None:
-        """Synchronous wrapper for make transfers."""
-        logger.info(f"Making {len(transfers_in)} transfer(s). Wildcard={wildcard}, FreeHit={free_hit}")
-        return asyncio.get_event_loop().run_until_complete(
-            self._make_transfers_async(transfers_in, transfers_out, wildcard, free_hit)
-        )
+        url = ENDPOINTS["transfers"]
+        logger.info(f"Making {len(transfers_in)} transfer(s). Chip={chip}")
+        return self._post(url, payload)
 
     # ──────────────── League Data ────────────────
 
@@ -424,49 +367,13 @@ class FPLClient:
         leagues = entry.get("leagues", {}).get("classic", [])
         return leagues
 
-    async def _get_league_standings_async(self, league_id: int) -> dict | None:
-        """Get standings for a classic league."""
-        try:
-            fpl = await self._init_session()
-            league = await fpl.get_classic_league(league_id, return_json=True)
-            return league
-        except Exception as e:
-            logger.error(f"Failed to get league standings: {e}")
-            return None
-
     def get_league_standings(self, league_id: int, page: int = 1) -> dict | None:
-        """Synchronous wrapper for league standings."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._get_league_standings_async(league_id)
-        )
-
-    async def _get_entry_picks_async(self, manager_id: int, event_id: int) -> dict | None:
-        """Get another manager's picks for a specific gameweek."""
-        try:
-            fpl = await self._init_session()
-            user = await fpl.get_user(manager_id)
-            picks = await user.get_picks(event_id)
-            return picks
-        except Exception as e:
-            logger.error(f"Failed to get entry picks: {e}")
-            return None
+        """Get standings for a classic league."""
+        url = ENDPOINTS["league_standings"].format(league_id=league_id)
+        url += f"?page_standings={page}&page_new_entries=1&phase=1"
+        return self._get(url)
 
     def get_entry_picks(self, manager_id: int, event_id: int) -> dict | None:
-        """Synchronous wrapper for entry picks."""
-        return asyncio.get_event_loop().run_until_complete(
-            self._get_entry_picks_async(manager_id, event_id)
-        )
-
-    # ──────────────── Cleanup ────────────────
-
-    def close(self):
-        """Close the session."""
-        asyncio.get_event_loop().run_until_complete(self._close_session())
-
-    def __del__(self):
-        """Cleanup on deletion."""
-        try:
-            if self._session:
-                self.close()
-        except Exception:
-            pass
+        """Get another manager's picks for a specific gameweek."""
+        url = ENDPOINTS["entry_picks"].format(manager_id=manager_id, event_id=event_id)
+        return self._get(url)

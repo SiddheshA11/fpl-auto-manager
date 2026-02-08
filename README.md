@@ -47,23 +47,38 @@ https://fantasy.premierleague.com/entry/1234567/event/1
                                          this is your Team ID
 ```
 
-### 3. Add GitHub Secrets
+### 3. Get your FPL Cookie (Required for authentication)
+
+Due to FPL's 2024 authentication changes, you need to extract cookies from your browser:
+
+1. Log in to [fantasy.premierleague.com](https://fantasy.premierleague.com) in your browser
+2. Open DevTools (F12 or right-click → Inspect)
+3. Go to the **Network** tab
+4. Refresh the page
+5. Click on any request to `fantasy.premierleague.com`
+6. In the **Headers** tab, find **Cookie** under Request Headers
+7. Copy the entire cookie string (it's long!)
+
+### 4. Add GitHub Secrets
 
 Go to your forked repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
-| Secret Name    | Value                        |
-|----------------|------------------------------|
-| `FPL_EMAIL`    | Your FPL login email         |
-| `FPL_PASSWORD` | Your FPL password            |
-| `FPL_TEAM_ID`  | Your Team ID (e.g. 1234567)  |
+| Secret Name    | Value                                    |
+|----------------|------------------------------------------|
+| `FPL_COOKIE`   | **Required** - Cookie string from step 3 |
+| `FPL_TEAM_ID`  | Your Team ID (e.g. 1234567)             |
+| `FPL_EMAIL`    | Your FPL email (optional, for fallback)  |
+| `FPL_PASSWORD` | Your FPL password (optional, for fallback)|
 
-### 4. Enable GitHub Actions
+> **Note**: The `FPL_COOKIE` is the primary authentication method. Email/password may not work due to FPL's 2024 authentication changes.
+
+### 5. Enable GitHub Actions
 
 Go to **Actions** tab → click **I understand my workflows, go ahead and enable them**.
 
 That's it. The bot runs automatically every Friday at 18:00 UTC and Saturday at 09:30 UTC.
 
-### 5. (Optional) Test with a dry run
+### 6. (Optional) Test with a dry run
 
 Go to **Actions** → **FPL Auto Manager - Weekly Run** → **Run workflow** → set `dry_run` to `true` → **Run workflow**.
 
