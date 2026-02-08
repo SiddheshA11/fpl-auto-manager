@@ -7,7 +7,6 @@ import time
 import logging
 import requests
 import pandas as pd
-from http.cookies import SimpleCookie
 from config import (
     FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID, FPL_COOKIE,
     ENDPOINTS, STRATEGY, LOGIN_URL,
@@ -61,22 +60,26 @@ class FPLClient:
     def _login_with_cookie(self) -> bool:
         """Authenticate by injecting cookies from browser session."""
         try:
-            # Parse the cookie string
-            cookie = SimpleCookie()
-            cookie.load(FPL_COOKIE)
+            logger.info(f"Cookie string length: {len(FPL_COOKIE)} chars")
             
-            # Add cookies to session
-            for key, morsel in cookie.items():
-                self.session.cookies.set(key, morsel.value, domain=".premierleague.com")
+            # Parse simple browser cookie format: key=value; key2=value2
+            cookie_count = 0
+            for item in FPL_COOKIE.split(';'):
+                item = item.strip()
+                if '=' in item:
+                    key, value = item.split('=', 1)
+                    key = key.strip()
+                    value = value.strip()
+                    # Set cookies for both domains
+                    self.session.cookies.set(key, value, domain=".premierleague.com")
+                    self.session.cookies.set(key, value, domain="fantasy.premierleague.com")
+                    cookie_count += 1
             
-            # Also handle simpler cookie format (key=value; key2=value2)
-            if not cookie.items():
-                for item in FPL_COOKIE.split(';'):
-                    item = item.strip()
-                    if '=' in item:
-                        key, value = item.split('=', 1)
-                        self.session.cookies.set(key.strip(), value.strip(), 
-                                                domain=".premierleague.com")
+            logger.info(f"Loaded {cookie_count} cookies from cookie string")
+            
+            if cookie_count == 0:
+                logger.error("No cookies parsed from FPL_COOKIE. Check the format.")
+                return False
             
             # Verify the cookies work by making an authenticated request
             verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
@@ -88,6 +91,7 @@ class FPLClient:
                 return True
             else:
                 logger.error(f"Cookie authentication failed. API returned {resp.status_code}")
+                logger.error(f"Response: {resp.text[:500] if resp.text else 'No response body'}")
                 return False
                 
         except Exception as e:
