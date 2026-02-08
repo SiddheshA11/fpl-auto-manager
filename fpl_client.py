@@ -30,26 +30,72 @@ class FPLClient:
 
     def login(self) -> bool:
         """Authenticate with FPL and store session cookies."""
+        # Step 1: Visit the login page to get initial cookies (CSRF token)
+        try:
+            login_page = self.session.get(LOGIN_URL)
+            login_page.raise_for_status()
+        except requests.RequestException as e:
+            logger.error(f"Failed to load login page: {e}")
+            return False
+
+        # Extract CSRF token from cookies
+        csrf_token = self.session.cookies.get("csrftoken", "")
+        if not csrf_token:
+            logger.warning("No CSRF token found in cookies, attempting login anyway...")
+
+        # Step 2: Submit login credentials
         payload = {
             "login": FPL_EMAIL,
             "password": FPL_PASSWORD,
-            "redirect_uri": "https://fantasy.premierleague.com/a/login",
+            "redirect_uri": "https://fantasy.premierleague.com/",
             "app": "plfpl-web",
         }
-        resp = self.session.post(LOGIN_URL, data=payload, allow_redirects=False)
-        # Successful login returns 302 redirect; failed returns 200 with error page
-        if resp.status_code in (200, 302) and "sessionid" in self.session.cookies.get_dict():
-            self.authenticated = True
-            logger.info("Successfully authenticated with FPL.")
-            return True
+        
+        headers = {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Referer": LOGIN_URL,
+            "Origin": "https://users.premierleague.com",
+        }
+        if csrf_token:
+            headers["X-CSRFToken"] = csrf_token
 
-        # Sometimes cookies are set even on 200
-        if "pl_profile" in self.session.cookies.get_dict():
+        # Step 3: POST login and follow redirects to capture all cookies
+        resp = self.session.post(LOGIN_URL, data=payload, headers=headers, allow_redirects=True)
+        
+        # Log cookies for debugging
+        cookies = self.session.cookies.get_dict()
+        logger.debug(f"Cookies after login: {list(cookies.keys())}")
+        
+        # Check for authentication cookies
+        auth_indicators = ["pl_profile", "sessionid", "datadome"]
+        has_auth_cookie = any(cookie in cookies for cookie in auth_indicators)
+        
+        if has_auth_cookie:
+            # Step 4: Verify by making an authenticated API call
+            verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
+            try:
+                verify_resp = self.session.get(verify_url)
+                if verify_resp.status_code == 200:
+                    self.authenticated = True
+                    logger.info("Successfully authenticated with FPL.")
+                    return True
+                else:
+                    logger.warning(f"Auth cookies present but API returned {verify_resp.status_code}")
+            except requests.RequestException as e:
+                logger.warning(f"Auth verification request failed: {e}")
+        
+        # Alternative: Check if we're logged in by looking for specific cookie patterns
+        if "pl_profile" in cookies:
             self.authenticated = True
-            logger.info("Authenticated (cookie-based check).")
+            logger.info("Authenticated (pl_profile cookie present).")
             return True
-
-        logger.error(f"Authentication failed. Status: {resp.status_code}")
+            
+        # Check response for error messages
+        if "Incorrect email or password" in resp.text or "errors" in resp.text.lower():
+            logger.error("Authentication failed: Invalid credentials")
+        else:
+            logger.error(f"Authentication failed. Status: {resp.status_code}, Cookies: {list(cookies.keys())}")
+        
         return False
 
     def _get(self, url: str, auth_required: bool = False) -> dict | list | None:
