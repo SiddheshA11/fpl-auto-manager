@@ -40,21 +40,23 @@ class FPLClient:
         Authenticate with FPL.
         
         Priority order:
-        1. Refresh token (automatic, recommended)
-        2. Cookie injection (manual, from browser)
+        1. Cookie-based (extracts access_token from cookie string)
+        2. Refresh token (single-use, may fail if already used)
         3. Email/password (legacy, may not work)
         """
-        # Method 1: Automatic token refresh (recommended)
+        # Method 1: Cookie-based authentication (most reliable)
+        if FPL_COOKIE:
+            logger.info("Using cookie-based authentication...")
+            if self._login_with_cookie():
+                return True
+            logger.warning("Cookie auth failed, trying refresh token...")
+        
+        # Method 2: Automatic token refresh (backup - single-use tokens)
         if FPL_REFRESH_TOKEN:
             logger.info("Using automatic token refresh...")
             if self._refresh_access_token():
                 return True
-            logger.warning("Token refresh failed, trying cookie fallback...")
-        
-        # Method 2: Cookie-based authentication
-        if FPL_COOKIE:
-            logger.info("Using cookie-based authentication...")
-            return self._login_with_cookie()
+            logger.warning("Token refresh failed...")
         
         # Method 3: Email/Password (may fail due to FPL's 2024 auth changes)
         if FPL_EMAIL and FPL_PASSWORD:
@@ -62,7 +64,7 @@ class FPLClient:
             return self._login_with_credentials()
         
         logger.error("No authentication credentials provided. "
-                    "Set FPL_REFRESH_TOKEN (recommended) or FPL_COOKIE.")
+                    "Set FPL_COOKIE (recommended) or FPL_REFRESH_TOKEN.")
         return False
 
     def _refresh_access_token(self) -> bool:
