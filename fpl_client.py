@@ -2,6 +2,7 @@
 FPL Auto Manager - API Client
 Handles authentication via token refresh or cookie injection.
 """
+import os
 import time
 import logging
 import requests
@@ -40,23 +41,23 @@ class FPLClient:
         Authenticate with FPL.
         
         Priority order:
-        1. Cookie-based (extracts access_token from cookie string)
-        2. Refresh token (single-use, may fail if already used)
+        1. Refresh token (automatic, with token rotation)
+        2. Cookie-based (extracts access_token from cookie string)
         3. Email/password (legacy, may not work)
         """
-        # Method 1: Cookie-based authentication (most reliable)
-        if FPL_COOKIE:
-            logger.info("Using cookie-based authentication...")
-            if self._login_with_cookie():
-                return True
-            logger.warning("Cookie auth failed, trying refresh token...")
-        
-        # Method 2: Automatic token refresh (backup - single-use tokens)
+        # Method 1: Automatic token refresh with rotation (recommended)
         if FPL_REFRESH_TOKEN:
             logger.info("Using automatic token refresh...")
             if self._refresh_access_token():
                 return True
-            logger.warning("Token refresh failed...")
+            logger.warning("Token refresh failed, trying cookie fallback...")
+        
+        # Method 2: Cookie-based authentication (fallback)
+        if FPL_COOKIE:
+            logger.info("Using cookie-based authentication...")
+            if self._login_with_cookie():
+                return True
+            logger.warning("Cookie auth failed...")
         
         # Method 3: Email/Password (may fail due to FPL's 2024 auth changes)
         if FPL_EMAIL and FPL_PASSWORD:
@@ -64,11 +65,14 @@ class FPLClient:
             return self._login_with_credentials()
         
         logger.error("No authentication credentials provided. "
-                    "Set FPL_COOKIE (recommended) or FPL_REFRESH_TOKEN.")
+                    "Set FPL_REFRESH_TOKEN (recommended) or FPL_COOKIE.")
         return False
 
     def _refresh_access_token(self) -> bool:
-        """Use refresh_token to obtain a new access_token from PingOne."""
+        """Use refresh_token to obtain a new access_token from PingOne.
+        
+        Also saves the new refresh_token to GitHub secrets for token rotation.
+        """
         try:
             payload = {
                 "grant_type": "refresh_token",
@@ -84,11 +88,16 @@ class FPLClient:
             if resp.status_code == 200:
                 token_data = resp.json()
                 access_token = token_data.get("access_token")
+                new_refresh_token = token_data.get("refresh_token")
                 
                 if access_token:
                     # Set the Bearer token for all future requests
                     self.session.headers["Authorization"] = f"Bearer {access_token}"
                     logger.info("Successfully refreshed access token")
+                    
+                    # Save the new refresh token for next time (token rotation)
+                    if new_refresh_token:
+                        self._update_github_secret("FPL_REFRESH_TOKEN", new_refresh_token)
                     
                     # Verify it works
                     verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
@@ -108,6 +117,67 @@ class FPLClient:
         except Exception as e:
             logger.error(f"Token refresh error: {e}")
             return False
+
+    def _update_github_secret(self, secret_name: str, secret_value: str) -> bool:
+        """Update a GitHub Actions secret with a new value.
+        
+        Uses PyNaCl for encryption as required by GitHub API.
+        """
+        github_token = os.environ.get("GITHUB_TOKEN")
+        github_repo = os.environ.get("GITHUB_REPOSITORY")
+        
+        if not github_token or not github_repo:
+            logger.warning("GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
+            return False
+        
+        try:
+            from nacl import public, encoding
+            
+            api_base = f"https://api.github.com/repos/{github_repo}"
+            headers = {
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            
+            # Get public key for encryption
+            key_resp = requests.get(f"{api_base}/actions/secrets/public-key", headers=headers)
+            if key_resp.status_code != 200:
+                logger.warning(f"Failed to get public key: {key_resp.status_code}")
+                return False
+            
+            key_data = key_resp.json()
+            public_key = public.PublicKey(key_data["key"].encode("utf-8"), encoding.Base64Encoder())
+            sealed_box = public.SealedBox(public_key)
+            
+            # Encrypt the secret
+            encrypted = sealed_box.encrypt(secret_value.encode("utf-8"))
+            encrypted_b64 = encoding.Base64Encoder().encode(encrypted).decode("utf-8")
+            
+            # Update the secret
+            update_resp = requests.put(
+                f"{api_base}/actions/secrets/{secret_name}",
+                headers=headers,
+                json={
+                    "encrypted_value": encrypted_b64,
+                    "key_id": key_data["key_id"],
+                }
+            )
+            
+            if update_resp.status_code in (201, 204):
+                logger.info(f"Updated GitHub secret {secret_name} for token rotation")
+                return True
+            else:
+                logger.warning(f"Failed to update secret: {update_resp.status_code}")
+                return False
+                
+        except ImportError:
+            logger.warning("PyNaCl not installed, cannot rotate refresh token")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to update GitHub secret: {e}")
+            return False
+
 
     def _login_with_cookie(self) -> bool:
         """Authenticate by extracting access_token and using as Bearer token."""
