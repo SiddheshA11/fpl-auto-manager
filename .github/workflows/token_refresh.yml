@@ -33,7 +33,7 @@ jobs:
         env:
           FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
           FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
-          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+          GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python token_refresh.py
 

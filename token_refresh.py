@@ -32,7 +32,7 @@ def encrypt_secret(public_key: str, secret_value: str) -> str:
 
 def update_github_secret(secret_name: str, secret_value: str) -> bool:
     """Update a GitHub Actions secret via the API."""
-    github_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_PAT")
+    github_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN")
     github_repo = os.environ.get("GITHUB_REPOSITORY")
     
     if not github_token or not github_repo:
