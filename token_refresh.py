@@ -98,18 +98,37 @@ def get_token_via_browser() -> str | None:
             logger.info("Navigating to FPL...")
             page.goto("https://fantasy.premierleague.com/")
             
-            # Wait for login button and click it
-            logger.info("Looking for login button...")
-            page.wait_for_timeout(2000)
+            # Wait for page to load
+            page.wait_for_timeout(3000)
+            
+            # Handle cookie consent dialog if present
+            logger.info("Checking for cookie consent dialog...")
+            try:
+                cookie_btn = page.locator('button:has-text("Accept All Cookies")').first
+                if cookie_btn.is_visible(timeout=3000):
+                    logger.info("Accepting cookies...")
+                    cookie_btn.click()
+                    page.wait_for_timeout(1000)
+            except:
+                logger.info("No cookie dialog found, continuing...")
             
             # Try to find and click login button
+            logger.info("Looking for login button...")
             try:
                 login_btn = page.locator("text=Log in").first
-                if login_btn.is_visible():
+                if login_btn.is_visible(timeout=3000):
                     login_btn.click()
-                    page.wait_for_timeout(2000)
+                    page.wait_for_timeout(3000)
             except:
-                pass  # May already be on login page
+                logger.info("No login button found, may already be on auth page...")
+            
+            # Wait for login page to load
+            logger.info("Waiting for login page...")
+            page.wait_for_timeout(2000)
+            
+            # Take screenshot to debug what page we're on
+            page.screenshot(path="login_page.png")
+            logger.info("Saved login page screenshot")
             
             # Wait for email input and fill credentials
             logger.info("Entering credentials...")
