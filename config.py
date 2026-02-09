@@ -20,7 +20,7 @@ GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "")
 # ─── OAuth/OIDC Authentication (for token refresh) ───
 # FPL uses PingOne/PingFederate behind account.premierleague.com
 OAUTH_CLIENT_ID = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
-OAUTH_TOKEN_URL = "https://account.premierleague.com/as/token.oauth2"
+OAUTH_TOKEN_URL = "https://account.premierleague.com/as/token"
 
 # Legacy PingOne config (kept for backward compatibility)
 PINGONE_ENV_ID = "68340de1-dfb9-412e-937c-20172986d129"
