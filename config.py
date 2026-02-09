@@ -17,10 +17,15 @@ FPL_REFRESH_TOKEN = os.environ.get("FPL_REFRESH_TOKEN", "")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "")
 
-# ─── PingOne Authentication (for token refresh) ───
+# ─── OAuth/OIDC Authentication (for token refresh) ───
+# FPL uses PingOne/PingFederate behind account.premierleague.com
+OAUTH_CLIENT_ID = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
+OAUTH_TOKEN_URL = "https://account.premierleague.com/as/token.oauth2"
+
+# Legacy PingOne config (kept for backward compatibility)
 PINGONE_ENV_ID = "68340de1-dfb9-412e-937c-20172986d129"
-PINGONE_CLIENT_ID = "1f243d70-a140-4035-8c41-341f5af5aa12"
-PINGONE_TOKEN_URL = f"https://auth.pingone.eu/{PINGONE_ENV_ID}/as/token"
+PINGONE_CLIENT_ID = OAUTH_CLIENT_ID
+PINGONE_TOKEN_URL = OAUTH_TOKEN_URL
 
 # ─── API Endpoints ───
 BASE_URL = "https://fantasy.premierleague.com/api"
