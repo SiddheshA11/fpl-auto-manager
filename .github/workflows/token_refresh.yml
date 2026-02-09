@@ -45,5 +45,6 @@ jobs:
           path: |
             debug_screenshot.png
             error_screenshot.png
+            login_page.png
           if-no-files-found: ignore
           retention-days: 7

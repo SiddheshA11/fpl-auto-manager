@@ -130,47 +130,57 @@ def get_token_via_browser() -> str | None:
             page.screenshot(path="login_page.png")
             logger.info("Saved login page screenshot")
             
-            # Wait for email input and fill credentials
+            # Fill in email - use placeholder matching from actual FPL login page
             logger.info("Entering credentials...")
-            page.wait_for_selector('input[type="email"], input[name="email"], #loginEmail', timeout=15000)
             
-            # Try different selectors for email field
-            email_selectors = ['input[type="email"]', 'input[name="email"]', '#loginEmail', 'input[id*="email"]']
-            for selector in email_selectors:
-                try:
-                    email_field = page.locator(selector).first
-                    if email_field.is_visible():
-                        email_field.fill(email)
+            # The FPL login page has inputs with placeholders "Email address" and "Password"
+            email_field = page.locator('input[placeholder="Email address"]').first
+            try:
+                email_field.wait_for(state="visible", timeout=15000)
+                email_field.fill(email)
+                logger.info("Filled email field")
+            except:
+                # Fallback: try all visible text inputs
+                logger.warning("Placeholder selector failed, trying fallback...")
+                inputs = page.locator('input:visible').all()
+                logger.info(f"Found {len(inputs)} visible inputs")
+                for i, inp in enumerate(inputs):
+                    input_type = inp.get_attribute("type") or ""
+                    placeholder = inp.get_attribute("placeholder") or ""
+                    logger.info(f"  Input {i}: type={input_type}, placeholder={placeholder}")
+                    if input_type in ("text", "email", "") or "email" in placeholder.lower():
+                        inp.fill(email)
+                        logger.info(f"  -> Filled input {i} with email")
                         break
-                except:
-                    continue
             
-            # Try different selectors for password field
-            password_selectors = ['input[type="password"]', 'input[name="password"]', '#loginPassword', 'input[id*="password"]']
-            for selector in password_selectors:
-                try:
-                    pwd_field = page.locator(selector).first
-                    if pwd_field.is_visible():
-                        pwd_field.fill(password)
-                        break
-                except:
-                    continue
+            # Fill in password
+            pwd_field = page.locator('input[placeholder="Password"]').first
+            try:
+                pwd_field.wait_for(state="visible", timeout=5000)
+                pwd_field.fill(password)
+                logger.info("Filled password field")
+            except:
+                # Fallback: try password type input
+                logger.warning("Password placeholder failed, trying type=password...")
+                pwd_fallback = page.locator('input[type="password"]').first
+                pwd_fallback.fill(password)
+                logger.info("Filled password via type=password")
             
             # Click sign in button
             logger.info("Clicking sign in...")
-            submit_selectors = ['button[type="submit"]', 'button:has-text("Sign in")', 'input[type="submit"]', 'button:has-text("Log in")']
-            for selector in submit_selectors:
-                try:
-                    submit_btn = page.locator(selector).first
-                    if submit_btn.is_visible():
-                        submit_btn.click()
-                        break
-                except:
-                    continue
+            try:
+                sign_in_btn = page.locator('button:has-text("Sign in")').first
+                sign_in_btn.wait_for(state="visible", timeout=5000)
+                sign_in_btn.click()
+                logger.info("Clicked Sign in button")
+            except:
+                # Fallback: try submit button
+                logger.warning("Sign in text button failed, trying submit...")
+                page.locator('button[type="submit"]').first.click()
             
             # Wait for redirect back to FPL
             logger.info("Waiting for login to complete...")
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(8000)
             
             # Navigate to FPL to ensure we're logged in
             page.goto("https://fantasy.premierleague.com/")
