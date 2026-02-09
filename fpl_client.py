@@ -315,7 +315,11 @@ class FPLClient:
         chips_played = {}
         if team_data and "chips" in team_data:
             for chip in team_data["chips"]:
-                chips_played[chip["name"]] = chip["event"]
+                # Use .get() since 'event' may not exist for unplayed chips
+                chip_name = chip.get("name")
+                chip_event = chip.get("event")
+                if chip_name and chip_event is not None:
+                    chips_played[chip_name] = chip_event
 
         all_chips = ["wildcard", "freehit", "bboost", "3xc"]
         return {c: {"played": c in chips_played, "event": chips_played.get(c)} for c in all_chips}
