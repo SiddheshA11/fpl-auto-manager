@@ -32,24 +32,38 @@ def encrypt_secret(public_key: str, secret_value: str) -> str:
 
 def update_github_secret(secret_name: str, secret_value: str) -> bool:
     """Update a GitHub Actions secret via the API."""
-    github_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN")
+    gh_pat = os.environ.get("GH_PAT")
+    github_token = os.environ.get("GITHUB_TOKEN")
     github_repo = os.environ.get("GITHUB_REPOSITORY")
     
-    if not github_token or not github_repo:
-        logger.error("GITHUB_TOKEN/GH_PAT or GITHUB_REPOSITORY not set")
+    # Use GH_PAT exclusively - GITHUB_TOKEN is the default Actions token
+    # which doesn't have secrets:write permission
+    if gh_pat:
+        token = gh_pat
+        logger.info(f"Using GH_PAT (length: {len(token)}, starts: {token[:10]}...)")
+    elif github_token:
+        token = github_token
+        logger.info(f"Using GITHUB_TOKEN fallback (length: {len(token)}, starts: {token[:10]}...)")
+    else:
+        logger.error("No GitHub token available (GH_PAT or GITHUB_TOKEN)")
+        return False
+    
+    if not github_repo:
+        logger.error("GITHUB_REPOSITORY not set")
         return False
     
     headers = {
-        "Authorization": f"token {github_token}",
+        "Authorization": f"token {token}",
         "Accept": "application/vnd.github.v3+json",
     }
     
     # Get the public key for encryption
     key_url = f"https://api.github.com/repos/{github_repo}/actions/secrets/public-key"
+    logger.info(f"Getting public key from: {key_url}")
     key_resp = requests.get(key_url, headers=headers)
     
     if key_resp.status_code != 200:
-        logger.error(f"Failed to get public key: {key_resp.status_code}")
+        logger.error(f"Failed to get public key: {key_resp.status_code} - {key_resp.text}")
         return False
     
     key_data = key_resp.json()
