@@ -1,82 +1,75 @@
 # FPL Auto Manager
 
-Fully automated Fantasy Premier League team manager. Runs weekly via GitHub Actions — handles transfers, lineup selection, captaincy, bench order, chip strategy, and league rival analysis without any manual intervention.
+Fully automated Fantasy Premier League team manager. Runs via GitHub Actions — handles transfers, lineup selection, captaincy, bench order, chip strategy, and league rival analysis without any manual intervention.
 
 ## What It Does
 
-Every week (Friday evening + Saturday morning safety check), the bot:
+**Dynamic scheduling**: Automatically detects each gameweek's actual deadline (Friday, Saturday, or Tuesday for double GWs) and runs at the right time.
 
-1. **Researches injuries and news online** — scrapes Premier Injuries, Rotowire predicted lineups, and FPL press conference updates to get the latest availability picture
-2. **Pulls advanced analytics** — fetches xG/xA data from Understat, computes form momentum, identifies set piece takers, analyzes home/away splits, and flags xG over/underperformers for regression
-3. **Scores every player** using a weighted model enhanced by the research above (form, fixtures, xGI, PPG, ICT, minutes, research boosts)
-4. **Analyzes your league rivals** — ownership %, captain picks, differentials, threats
-5. **Decides on chip usage** — Wildcard, Free Hit, Bench Boost, Triple Captain with confidence thresholds
-6. **Makes transfers** — aggressive strategy, willing to take hits up to -8 for high-ceiling moves
+1. **Researches injuries and news online** — scrapes Premier Injuries, Rotowire predicted lineups, and FPL press conference updates
+2. **Pulls advanced analytics** — fetches xG/xA data from Understat, computes form momentum, identifies set piece takers
+3. **Scores every player** using a weighted model enhanced by research (form, fixtures, xGI, PPG, ICT, minutes)
+4. **Analyzes your league rivals** — ownership %, captain picks, differentials
+5. **Decides on chip usage** — Wildcard, Free Hit, Bench Boost, Triple Captain
+6. **Makes transfers** — aggressive strategy, willing to take hits for high-ceiling moves
 7. **Selects the best XI** — tries all valid formations, optimizes bench order
-8. **Picks captain & vice-captain** — considers differential captaincy for upside
+8. **Picks captain & vice-captain** — considers differential captaincy
 9. **Submits everything** to FPL automatically
 
-The Saturday deadline check re-runs all research to catch any last-minute injury news or lineup leaks before the gameweek locks.
+Plus a safety run 2 hours before deadline to catch last-minute news.
 
 ## Research Sources
 
-The bot gathers intelligence from multiple sources each week:
+| Source | What it provides |
+|--------|-----------------|
+| **FPL API** | Official player flags, chance_of_playing %, news |
+| **Premier Injuries** | Injury table with return dates |
+| **Rotowire** | Predicted starting lineups |
+| **Understat** | xG, xA, expected vs actual |
 
-| Source | What it provides | Reliability |
-|--------|-----------------|-------------|
-| **FPL API** | Official player flags, chance_of_playing %, news text | Always available |
-| **Premier Injuries** | Comprehensive injury table with return dates | Web scrape, graceful fallback |
-| **Rotowire** | Predicted starting lineups, confirmed outs | Web scrape, graceful fallback |
-| **Understat** | xG, xA, actual vs expected goal involvement | Web scrape, graceful fallback |
-| **FPL Bootstrap** | Form momentum, set piece duties, rotation patterns | Always available |
-
-All web sources fail gracefully — if a site is down, the bot continues with FPL API data only.
+All web sources fail gracefully — if a site is down, the bot continues with FPL API data.
 
 ## Setup (5 minutes)
 
 ### 1. Fork this repo
-
 Click **Fork** on GitHub.
 
 ### 2. Find your FPL Team ID
-
-Go to [fantasy.premierleague.com](https://fantasy.premierleague.com), click **Points**, and grab the number from the URL:
+Go to [fantasy.premierleague.com](https://fantasy.premierleague.com), click **Points**, grab the number from URL:
 ```
 https://fantasy.premierleague.com/entry/1234567/event/1
-                                         ^^^^^^^
-                                         this is your Team ID
+                                         ^^^^^^^ Team ID
 ```
 
-### 3. Get your FPL Cookie (Required for authentication)
+### 3. Get your FPL Refresh Token (Recommended - lasts 30 days)
 
-Due to FPL's 2024 authentication changes, you need to extract cookies from your browser:
+1. Log in to [fantasy.premierleague.com](https://fantasy.premierleague.com)
+2. Open DevTools (F12) → **Application** tab → **Cookies** → `fantasy.premierleague.com`
+3. Find `refresh_token` and copy its value
 
-1. Log in to [fantasy.premierleague.com](https://fantasy.premierleague.com) in your browser
-2. Open DevTools (F12 or right-click → Inspect)
-3. Go to the **Network** tab
-4. Refresh the page
-5. Click on any request to `fantasy.premierleague.com`
-6. In the **Headers** tab, find **Cookie** under Request Headers
-7. Copy the entire cookie string (it's long!)
+**Or** get FPL Cookie (shorter lifespan):
+1. Go to **Network** tab → refresh page → click any request
+2. Copy the full **Cookie** header value
 
 ### 4. Add GitHub Secrets
 
-Go to your forked repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
+Go to your repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
-| Secret Name    | Value                                    |
-|----------------|------------------------------------------|
-| `FPL_COOKIE`   | **Required** - Cookie string from step 3 |
-| `FPL_TEAM_ID`  | Your Team ID (e.g. 1234567)             |
-| `FPL_EMAIL`    | Your FPL email (optional, for fallback)  |
-| `FPL_PASSWORD` | Your FPL password (optional, for fallback)|
+| Secret Name | Required | Description |
+|-------------|----------|-------------|
+| `FPL_REFRESH_TOKEN` | ✅ Recommended | Refresh token (lasts ~30 days) |
+| `FPL_TEAM_ID` | ✅ Required | Your Team ID |
+| `FPL_COOKIE` | Optional | Full cookie string (fallback) |
+| `FPL_EMAIL` | Optional | FPL email (legacy fallback) |
+| `FPL_PASSWORD` | Optional | FPL password (legacy fallback) |
 
-> **Note**: The `FPL_COOKIE` is the primary authentication method. Email/password may not work due to FPL's 2024 authentication changes.
+> **💡 Tip**: Use `FPL_REFRESH_TOKEN` — it lasts 30 days vs 8 hours for cookies. You'll get a GitHub issue reminder monthly to refresh it.
 
 ### 5. Enable GitHub Actions
-
 Go to **Actions** tab → click **I understand my workflows, go ahead and enable them**.
 
-That's it. The bot runs automatically every Friday at 18:00 UTC and Saturday at 09:30 UTC.
+**That's it!** The scheduler runs every 2 hours, automatically triggering runs before each deadline.
+
 
 ### 6. (Optional) Test with a dry run
 

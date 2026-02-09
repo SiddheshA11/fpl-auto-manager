@@ -1,12 +1,9 @@
 name: FPL Auto Manager - Deadline Check
 
-# Secondary run: checks 2 hours before the actual GW deadline
-# This acts as a safety net to catch last-minute injury news
+# Dynamically triggered by scheduler.yml ~2 hours before deadline
+# Acts as a safety net to catch last-minute injury news
 
 on:
-  schedule:
-    # Runs Saturday at 09:30 UTC (typical 11:30 BST deadline buffer)
-    - cron: '30 9 * * 6'
   workflow_dispatch:
 
 jobs:
@@ -33,6 +30,7 @@ jobs:
           FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
           FPL_COOKIE: ${{ secrets.FPL_COOKIE }}
+          FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
         run: python deadline_check.py
 
       - name: Upload logs

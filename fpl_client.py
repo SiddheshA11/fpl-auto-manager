@@ -1,15 +1,14 @@
 """
 FPL Auto Manager - API Client
-Handles authentication via cookie injection (workaround for FPL's 2024 auth changes)
-and data fetching from the FPL API.
+Handles authentication via token refresh or cookie injection.
 """
 import time
 import logging
 import requests
 import pandas as pd
 from config import (
-    FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID, FPL_COOKIE,
-    ENDPOINTS, STRATEGY, LOGIN_URL,
+    FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID, FPL_COOKIE, FPL_REFRESH_TOKEN,
+    ENDPOINTS, STRATEGY, LOGIN_URL, PINGONE_TOKEN_URL, PINGONE_CLIENT_ID,
 )
 
 logger = logging.getLogger("fpl_auto")
@@ -40,22 +39,73 @@ class FPLClient:
         """
         Authenticate with FPL.
         
-        Primary method: Cookie injection (FPL_COOKIE environment variable)
-        Fallback: Email/password login (may not work due to FPL's 2024 auth changes)
+        Priority order:
+        1. Refresh token (automatic, recommended)
+        2. Cookie injection (manual, from browser)
+        3. Email/password (legacy, may not work)
         """
-        # Method 1: Cookie-based authentication (recommended)
+        # Method 1: Automatic token refresh (recommended)
+        if FPL_REFRESH_TOKEN:
+            logger.info("Using automatic token refresh...")
+            if self._refresh_access_token():
+                return True
+            logger.warning("Token refresh failed, trying cookie fallback...")
+        
+        # Method 2: Cookie-based authentication
         if FPL_COOKIE:
             logger.info("Using cookie-based authentication...")
             return self._login_with_cookie()
         
-        # Method 2: Email/Password (may fail due to FPL's 2024 auth changes)
+        # Method 3: Email/Password (may fail due to FPL's 2024 auth changes)
         if FPL_EMAIL and FPL_PASSWORD:
             logger.info("Using email/password authentication...")
             return self._login_with_credentials()
         
         logger.error("No authentication credentials provided. "
-                    "Set FPL_COOKIE (recommended) or FPL_EMAIL+FPL_PASSWORD.")
+                    "Set FPL_REFRESH_TOKEN (recommended) or FPL_COOKIE.")
         return False
+
+    def _refresh_access_token(self) -> bool:
+        """Use refresh_token to obtain a new access_token from PingOne."""
+        try:
+            payload = {
+                "grant_type": "refresh_token",
+                "refresh_token": FPL_REFRESH_TOKEN,
+                "client_id": PINGONE_CLIENT_ID,
+            }
+            headers = {
+                "Content-Type": "application/x-www-form-urlencoded",
+            }
+            
+            resp = requests.post(PINGONE_TOKEN_URL, data=payload, headers=headers)
+            
+            if resp.status_code == 200:
+                token_data = resp.json()
+                access_token = token_data.get("access_token")
+                
+                if access_token:
+                    # Set the Bearer token for all future requests
+                    self.session.headers["Authorization"] = f"Bearer {access_token}"
+                    logger.info("Successfully refreshed access token")
+                    
+                    # Verify it works
+                    verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
+                    verify_resp = self.session.get(verify_url)
+                    
+                    if verify_resp.status_code == 200:
+                        self.authenticated = True
+                        logger.info("Token refresh authentication successful")
+                        return True
+                    else:
+                        logger.error(f"Token validation failed: {verify_resp.status_code}")
+                        return False
+                        
+            logger.error(f"Token refresh failed: {resp.status_code} - {resp.text[:200]}")
+            return False
+            
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            return False
 
     def _login_with_cookie(self) -> bool:
         """Authenticate by extracting access_token and using as Bearer token."""

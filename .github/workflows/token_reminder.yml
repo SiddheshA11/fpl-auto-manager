@@ -1,0 +1,48 @@
+name: FPL Auto Manager - Token Reminder
+
+# Monthly reminder to refresh your FPL token
+# Creates a GitHub issue as a reminder
+
+on:
+  schedule:
+    - cron: '0 12 1 * *'  # 1st of every month at 12:00 UTC
+  workflow_dispatch:  # Allow manual trigger for testing
+
+jobs:
+  create-reminder:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      
+    steps:
+      - name: Create token refresh reminder issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🔑 FPL Token Refresh Reminder';
+            const body = `## Monthly Token Refresh Reminder
+
+            Your FPL refresh token may expire soon. Please refresh it to ensure uninterrupted automated team management.
+
+            ### How to Refresh Your Token
+
+            1. **Log in to FPL**: Go to [fantasy.premierleague.com](https://fantasy.premierleague.com) and log in
+            2. **Open Developer Tools**: Press F12 → Application tab → Cookies → fantasy.premierleague.com
+            3. **Find refresh_token**: Copy the value of the \`refresh_token\` cookie
+            4. **Update Secret**: Go to this repo's Settings → Secrets → Actions → Update \`FPL_REFRESH_TOKEN\`
+
+            ---
+            
+            *This is an automated monthly reminder. Close this issue once you've updated your token.*
+            
+            Generated: ${new Date().toISOString()}`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: title,
+              body: body,
+              labels: ['reminder', 'maintenance']
+            });
+            
+            console.log('Reminder issue created successfully');

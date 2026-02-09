@@ -1,11 +1,8 @@
 name: FPL Auto Manager - Weekly Run
 
 on:
-  # Runs every Friday at 18:00 UTC (before typical Saturday deadline)
-  schedule:
-    - cron: '0 18 * * 5'
-
-  # Also allow manual trigger from GitHub UI
+  # Dynamically triggered by scheduler.yml based on actual deadline
+  # Manual trigger still available for testing
   workflow_dispatch:
     inputs:
       dry_run:
@@ -41,6 +38,7 @@ jobs:
           FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
           FPL_COOKIE: ${{ secrets.FPL_COOKIE }}
+          FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
         run: |
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python manager.py --dry-run

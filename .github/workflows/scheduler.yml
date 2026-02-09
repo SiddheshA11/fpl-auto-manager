@@ -1,0 +1,33 @@
+name: FPL Auto Manager - Scheduler
+
+# Runs every 2 hours to check for upcoming deadlines
+# and dynamically trigger the main workflow when needed
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # Every 2 hours
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  check-deadline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Check deadlines and trigger workflows
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python deadline_scheduler.py

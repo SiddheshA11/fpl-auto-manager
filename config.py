@@ -11,6 +11,16 @@ FPL_TEAM_ID = int(os.environ.get("FPL_TEAM_ID", "0"))
 # Cookie-based auth (workaround for FPL's 2024 auth changes)
 # Extract the full cookie string from your browser after logging in
 FPL_COOKIE = os.environ.get("FPL_COOKIE", "")
+# Refresh token for automatic access token renewal (lasts ~30 days)
+FPL_REFRESH_TOKEN = os.environ.get("FPL_REFRESH_TOKEN", "")
+# GitHub token for triggering workflows dynamically
+GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
+GITHUB_REPO = os.environ.get("GITHUB_REPOSITORY", "")
+
+# ─── PingOne Authentication (for token refresh) ───
+PINGONE_ENV_ID = "68340de1-dfb9-412e-937c-20172986d129"
+PINGONE_CLIENT_ID = "1f243d70-a140-4035-8c41-341f5af5aa12"
+PINGONE_TOKEN_URL = f"https://auth.pingone.eu/{PINGONE_ENV_ID}/as/token"
 
 # ─── API Endpoints ───
 BASE_URL = "https://fantasy.premierleague.com/api"
