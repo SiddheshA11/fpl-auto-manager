@@ -58,18 +58,26 @@ class FPLClient:
         return False
 
     def _login_with_cookie(self) -> bool:
-        """Authenticate by injecting cookies from browser session."""
+        """Authenticate by extracting access_token and using as Bearer token."""
         try:
             logger.info(f"Cookie string length: {len(FPL_COOKIE)} chars")
             
-            # Parse simple browser cookie format: key=value; key2=value2
+            # Parse cookies and look for access_token
+            access_token = None
             cookie_count = 0
+            
             for item in FPL_COOKIE.split(';'):
                 item = item.strip()
                 if '=' in item:
                     key, value = item.split('=', 1)
                     key = key.strip()
                     value = value.strip()
+                    
+                    # Extract access_token for Bearer auth
+                    if key == 'access_token':
+                        access_token = value
+                        logger.info("Found access_token in cookies")
+                    
                     # Set cookies for both domains
                     self.session.cookies.set(key, value, domain=".premierleague.com")
                     self.session.cookies.set(key, value, domain="fantasy.premierleague.com")
@@ -81,21 +89,28 @@ class FPLClient:
                 logger.error("No cookies parsed from FPL_COOKIE. Check the format.")
                 return False
             
-            # Verify the cookies work by making an authenticated request
+            # FPL now requires Bearer token authentication
+            if access_token:
+                self.session.headers["Authorization"] = f"Bearer {access_token}"
+                logger.info("Set Authorization header with access_token")
+            else:
+                logger.warning("No access_token found in cookies - authentication may fail")
+            
+            # Verify the auth works by making an authenticated request
             verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
             resp = self.session.get(verify_url)
             
             if resp.status_code == 200:
                 self.authenticated = True
-                logger.info("Successfully authenticated with cookies.")
+                logger.info("Successfully authenticated with Bearer token.")
                 return True
             else:
-                logger.error(f"Cookie authentication failed. API returned {resp.status_code}")
+                logger.error(f"Authentication failed. API returned {resp.status_code}")
                 logger.error(f"Response: {resp.text[:500] if resp.text else 'No response body'}")
                 return False
                 
         except Exception as e:
-            logger.error(f"Cookie authentication failed: {e}")
+            logger.error(f"Authentication failed: {e}")
             return False
 
     def _login_with_credentials(self) -> bool:
