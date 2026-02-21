@@ -3,10 +3,12 @@ FPL Auto Manager - Deadline Scheduler
 Runs periodically to check for upcoming deadlines and trigger the main workflow.
 """
 import sys
+import os
 import json
 import logging
 import argparse
 from datetime import datetime, timezone
+from pathlib import Path
 import requests
 
 from config import ENDPOINTS, GITHUB_TOKEN, GITHUB_REPO
@@ -18,8 +20,48 @@ logging.basicConfig(
 logger = logging.getLogger("fpl_scheduler")
 
 # Hours before deadline to trigger different workflows
-MAIN_RUN_HOURS_BEFORE = 24  # Run main workflow 24 hours before deadline
-DEADLINE_CHECK_HOURS_BEFORE = 2  # Run deadline check 2 hours before
+MAIN_RUN_HOURS_BEFORE = 24  # Run main workflow ~24 hours before deadline
+DEADLINE_CHECK_HOURS_BEFORE = 2  # Run deadline check ~2 hours before
+
+# Wider windows to avoid missing deadlines (scheduler runs every 2h)
+MAIN_RUN_WINDOW = 4   # ±4h → triggers when 20-28h before deadline
+DEADLINE_CHECK_WINDOW = 1  # ±1h → triggers when 1-3h before deadline
+
+# Deduplication tracker file
+TRACKER_FILE = Path("/tmp/fpl_scheduler_triggered.json")
+
+
+def _load_tracker() -> dict:
+    """Load the deduplication tracker."""
+    try:
+        if TRACKER_FILE.exists():
+            return json.loads(TRACKER_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+
+def _save_tracker(tracker: dict) -> None:
+    """Save the deduplication tracker."""
+    try:
+        TRACKER_FILE.write_text(json.dumps(tracker))
+    except Exception as e:
+        logger.warning(f"Could not save tracker: {e}")
+
+
+def _already_triggered(gw_id: int, workflow_type: str) -> bool:
+    """Check if we already triggered this workflow for this gameweek."""
+    tracker = _load_tracker()
+    key = f"gw{gw_id}_{workflow_type}"
+    return tracker.get(key, False)
+
+
+def _mark_triggered(gw_id: int, workflow_type: str) -> None:
+    """Mark a workflow as triggered for this gameweek."""
+    tracker = _load_tracker()
+    key = f"gw{gw_id}_{workflow_type}"
+    tracker[key] = datetime.now(timezone.utc).isoformat()
+    _save_tracker(tracker)
 
 
 def get_next_deadline() -> tuple[datetime | None, int | None]:
@@ -51,9 +93,10 @@ def get_next_deadline() -> tuple[datetime | None, int | None]:
 
 
 def trigger_workflow(workflow_name: str, inputs: dict = None) -> bool:
-    """Trigger a GitHub Actions workflow via repository dispatch."""
+    """Trigger a GitHub Actions workflow via workflow_dispatch."""
     if not GITHUB_TOKEN or not GITHUB_REPO:
-        logger.error("GITHUB_TOKEN or GITHUB_REPOSITORY not set")
+        logger.error("GITHUB_TOKEN or GITHUB_REPOSITORY not set. "
+                     "Ensure GH_PAT is configured in secrets.")
         return False
     
     url = f"https://api.github.com/repos/{GITHUB_REPO}/actions/workflows/{workflow_name}/dispatches"
@@ -96,15 +139,23 @@ def check_and_trigger(check_only: bool = False) -> None:
         logger.info("Check-only mode, not triggering any workflows")
         return
     
-    # Trigger main workflow ~24 hours before (within 2 hour window)
-    if MAIN_RUN_HOURS_BEFORE - 1 <= hours_until <= MAIN_RUN_HOURS_BEFORE + 1:
-        logger.info(f"Triggering main weekly run for GW{gw_id}")
-        trigger_workflow("weekly_run.yml", {"dry_run": "false"})
+    # Trigger main workflow ~24h before deadline (wide window: 20-28h)
+    if (MAIN_RUN_HOURS_BEFORE - MAIN_RUN_WINDOW) <= hours_until <= (MAIN_RUN_HOURS_BEFORE + MAIN_RUN_WINDOW):
+        if _already_triggered(gw_id, "main"):
+            logger.info(f"Main run already triggered for GW{gw_id}, skipping")
+        else:
+            logger.info(f"Triggering main weekly run for GW{gw_id}")
+            if trigger_workflow("weekly_run.yml", {"dry_run": "false"}):
+                _mark_triggered(gw_id, "main")
     
-    # Trigger deadline check ~2 hours before (within 30 min window)
-    elif DEADLINE_CHECK_HOURS_BEFORE - 0.5 <= hours_until <= DEADLINE_CHECK_HOURS_BEFORE + 0.5:
-        logger.info(f"Triggering deadline check for GW{gw_id}")
-        trigger_workflow("deadline_check.yml")
+    # Trigger deadline check ~2h before deadline (window: 1-3h)
+    elif (DEADLINE_CHECK_HOURS_BEFORE - DEADLINE_CHECK_WINDOW) <= hours_until <= (DEADLINE_CHECK_HOURS_BEFORE + DEADLINE_CHECK_WINDOW):
+        if _already_triggered(gw_id, "deadline"):
+            logger.info(f"Deadline check already triggered for GW{gw_id}, skipping")
+        else:
+            logger.info(f"Triggering deadline check for GW{gw_id}")
+            if trigger_workflow("deadline_check.yml"):
+                _mark_triggered(gw_id, "deadline")
     
     else:
         logger.info("No workflow trigger needed at this time")

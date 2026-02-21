@@ -28,6 +28,6 @@ jobs:
 
       - name: Check deadlines and trigger workflows
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python deadline_scheduler.py

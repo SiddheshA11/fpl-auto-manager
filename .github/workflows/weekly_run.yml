@@ -1,7 +1,10 @@
 name: FPL Auto Manager - Weekly Run
 
 on:
-  # Dynamically triggered by scheduler.yml based on actual deadline
+  # Fallback cron: every Friday at 10:00 UTC (~24h before most Saturday deadlines)
+  # Primary trigger is still dynamic via scheduler.yml
+  schedule:
+    - cron: '0 10 * * 5'
   # Manual trigger still available for testing
   workflow_dispatch:
     inputs:
