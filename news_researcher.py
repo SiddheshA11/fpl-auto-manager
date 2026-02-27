@@ -163,7 +163,8 @@ class NewsResearcher:
         Scrape premierinjuries.com for the latest injury table.
         Falls back gracefully if the site is unavailable.
         """
-        url = STRATEGY.get("news_sources", [""])[0]
+        sources = STRATEGY.get("news_sources", [])
+        url = sources[0] if len(sources) > 0 else ""
         if not url:
             return
 
@@ -270,7 +271,8 @@ class NewsResearcher:
         Players in predicted lineups get a slight boost;
         players explicitly listed as out get penalized.
         """
-        url = STRATEGY.get("news_sources", ["", ""])[1] if len(STRATEGY.get("news_sources", [])) > 1 else ""
+        sources = STRATEGY.get("news_sources", [])
+        url = sources[1] if len(sources) > 1 else ""
         if not url:
             return
 
