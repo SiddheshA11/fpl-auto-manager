@@ -42,66 +42,53 @@ class WebResearcher:
         self.events = bootstrap_data.get("events", [])
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (compatible; FPL-Auto-Manager/1.0)"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5"
         })
 
     # ──────────────── 1. Understat xG Data ────────────────
 
     def fetch_understat_xg(self) -> dict[int, dict]:
         """
-        Fetch xG and xA data from Understat for all EPL players.
+        Fetch xG and xA data directly from the FPL API bootstrap data.
+        The FPL API now includes native expected fields.
         Returns: {fpl_player_id: {"xg": float, "xa": float, "xgi_per90": float}}
         """
         xg_data = {}
         try:
-            url = f"{self.UNDERSTAT_BASE}/league/EPL"
-            resp = self.session.get(url, timeout=20)
-            resp.raise_for_status()
-            html = resp.text
-
-            # Understat embeds player data as JSON in a script tag
-            # Pattern: var playersData = JSON.parse('...')
-            match = re.search(r"var\s+playersData\s*=\s*JSON\.parse\('(.+?)'\)", html)
-            if not match:
-                logger.warning("Could not find Understat player data in page.")
-                return xg_data
-
-            raw_json = match.group(1)
-            # Understat uses unicode escapes
-            raw_json = raw_json.encode().decode('unicode_escape')
-            players_raw = json.loads(raw_json)
-
-            for player in players_raw:
-                name = player.get("player_name", "")
-                xg = float(player.get("xG", 0))
-                xa = float(player.get("xA", 0))
-                minutes = int(player.get("time", 0))
-
+            for pid, player in self.players.items():
+                minutes = player.get("minutes", 0)
                 if minutes < 90:
                     continue
 
-                xgi_per90 = (xg + xa) * 90 / max(minutes, 1)
-                goals = int(player.get("goals", 0))
+                # FPL natively provides expected metrics down to the season total
+                xg = float(player.get("expected_goals", 0) or 0)
+                xa = float(player.get("expected_assists", 0) or 0)
+                
+                # FPL also natively provides per 90 metrics, but we can compute them
+                # if they are missing
+                xgi_per90_str = player.get("expected_goal_involvements_per_90")
+                if xgi_per90_str is not None:
+                    xgi_per90 = float(xgi_per90_str)
+                else:
+                    xgi_per90 = (xg + xa) * 90 / max(minutes, 1)
+
+                goals = int(player.get("goals_scored", 0))
                 assists = int(player.get("assists", 0))
+                actual_gi_per90 = (goals + assists) * 90 / max(minutes, 1)
 
-                # Match to FPL player
-                fpl_id = self._match_understat_to_fpl(name, player.get("team_title", ""))
-                if fpl_id:
-                    actual_gi_per90 = (goals + assists) * 90 / max(minutes, 1)
-                    xg_data[fpl_id] = {
-                        "xg": xg,
-                        "xa": xa,
-                        "xgi_per90": xgi_per90,
-                        "actual_gi_per90": actual_gi_per90,
-                        "xg_diff": actual_gi_per90 - xgi_per90,  # positive = overperforming
-                    }
+                xg_data[pid] = {
+                    "xg": xg,
+                    "xa": xa,
+                    "xgi_per90": xgi_per90,
+                    "actual_gi_per90": actual_gi_per90,
+                    "xg_diff": actual_gi_per90 - xgi_per90,  # positive = overperforming
+                }
 
-            logger.info(f"Understat xG: matched {len(xg_data)} players.")
-
-        except requests.RequestException as e:
-            logger.warning(f"Understat fetch failed (non-critical): {e}")
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.warning(f"Understat parse error: {e}")
+            logger.info(f"FPL Native xG: matched {len(xg_data)} players.")
+        except Exception as e:
+            logger.warning(f"Error parsing natively FPL xG data: {e}")
 
         return xg_data
 

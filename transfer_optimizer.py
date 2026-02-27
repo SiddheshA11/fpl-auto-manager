@@ -75,6 +75,8 @@ class TransferOptimizer:
 
         transfers_in = []
         transfers_out = []
+        prices_in = []
+        prices_out = []
         total_gain = 0.0
         budget_remaining = bank
 
@@ -136,6 +138,8 @@ class TransferOptimizer:
             # Execute this transfer
             transfers_out.append(player_id)
             transfers_in.append(int(best_replacement["id"]))
+            prices_out.append(int(sell_price * 10))
+            prices_in.append(int(best_replacement["now_cost_m"] * 10))
             total_gain += net_gain
             budget_remaining = available_budget - best_replacement["now_cost_m"]
 
@@ -154,6 +158,8 @@ class TransferOptimizer:
         result = {
             "transfers_in": transfers_in,
             "transfers_out": transfers_out,
+            "prices_in": prices_in,
+            "prices_out": prices_out,
             "expected_gain": total_gain,
             "hit_cost": hit_points,
             "num_transfers": len(transfers_in),
@@ -184,6 +190,8 @@ class TransferOptimizer:
         resp = self.client.make_transfers(
             transfers_in=transfer_plan["transfers_in"],
             transfers_out=transfer_plan["transfers_out"],
+            prices_in=transfer_plan.get("prices_in", []),
+            prices_out=transfer_plan.get("prices_out", []),
             wildcard=transfer_plan["use_wildcard"],
             free_hit=transfer_plan["use_free_hit"],
         )

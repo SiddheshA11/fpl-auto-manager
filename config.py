@@ -97,9 +97,8 @@ STRATEGY = {
     # News research settings
     "news_research_enabled": True,
     "news_sources": [
-        # RSS / JSON feeds for injury and team news
-        "https://www.premierinjuries.com/injury-table.php",
-        "https://www.rotowire.com/soccer/lineups.php?league=EPL",
+        # Note: PremierInjuries and Rotowire are actively blocking automated scrapers.
+        # Removing them from the default config to gracefully fallback to FPL native API flags.
     ],
     "news_stale_hours": 48,           # ignore FPL news older than this
     "news_weight_in_score": 0.20,     # how much news/availability affects final score

@@ -147,6 +147,8 @@ def run_weekly_cycle(dry_run: bool = False):
         transfer_plan = {
             "transfers_in": [p["element"] for p in optimal_squad],
             "transfers_out": [p["element"] for p in my_team["picks"]],
+            "prices_in": [int(p["now_cost_m"] * 10) for p in optimal_squad],
+            "prices_out": [int(p.get("selling_price", 0)) for p in my_team["picks"]],
             "use_wildcard": True,
             "use_free_hit": False,
             "expected_gain": 0,
@@ -160,6 +162,8 @@ def run_weekly_cycle(dry_run: bool = False):
         transfer_plan = {
             "transfers_in": [p["element"] for p in optimal_squad],
             "transfers_out": [p["element"] for p in my_team["picks"]],
+            "prices_in": [int(p["now_cost_m"] * 10) for p in optimal_squad],
+            "prices_out": [int(p.get("selling_price", 0)) for p in my_team["picks"]],
             "use_wildcard": False,
             "use_free_hit": True,
             "expected_gain": 0,

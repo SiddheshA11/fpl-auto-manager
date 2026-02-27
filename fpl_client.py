@@ -465,17 +465,20 @@ class FPLClient:
         return self._post(url, payload)
 
     def make_transfers(self, transfers_in: list[int], transfers_out: list[int],
+                       prices_in: list[int], prices_out: list[int],
                        wildcard: bool = False, free_hit: bool = False) -> dict | None:
         """
         Execute transfers.
 
         transfers_in:  list of player IDs to buy
         transfers_out: list of player IDs to sell (same length)
+        prices_in: list of prices in tenths of a million for players to buy
+        prices_out: list of prices in tenths of a million for players to sell
         wildcard: activate wildcard chip
         free_hit: activate free hit chip
         """
-        if len(transfers_in) != len(transfers_out):
-            raise ValueError("transfers_in and transfers_out must be the same length.")
+        if len(transfers_in) != len(transfers_out) or len(transfers_in) != len(prices_in) or len(transfers_out) != len(prices_out):
+            raise ValueError("All transfer lists must be the same length.")
 
         next_event = self.get_next_event()
         if not next_event:
@@ -493,8 +496,13 @@ class FPLClient:
             "entry": FPL_TEAM_ID,
             "event": next_event["id"],
             "transfers": [
-                {"element_in": t_in, "element_out": t_out, "purchase_price": 0, "selling_price": 0}
-                for t_in, t_out in zip(transfers_in, transfers_out)
+                {
+                    "element_in": t_in, 
+                    "element_out": t_out, 
+                    "purchase_price": p_in, 
+                    "selling_price": p_out
+                }
+                for t_in, t_out, p_in, p_out in zip(transfers_in, transfers_out, prices_in, prices_out)
             ],
         }
 
