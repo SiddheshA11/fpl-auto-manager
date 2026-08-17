@@ -123,11 +123,16 @@ class FPLClient:
         
         Uses PyNaCl for encryption as required by GitHub API.
         """
-        github_token = os.environ.get("GITHUB_TOKEN")
+        # GH_PAT first, matching token_refresh.py and the workflow env blocks.
+        # Reading only GITHUB_TOKEN meant this never found a token in the
+        # weekly run: PingOne rotates the refresh token on use, so the run
+        # consumed the old one, failed to persist the new one, and every later
+        # refresh was dead - a warning, then silent auth failure the next week.
+        github_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN")
         github_repo = os.environ.get("GITHUB_REPOSITORY")
         
         if not github_token or not github_repo:
-            logger.warning("GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
+            logger.warning("GH_PAT/GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
             return False
         
         try:

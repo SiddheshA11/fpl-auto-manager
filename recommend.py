@@ -65,16 +65,24 @@ def build_model(bootstrap: dict, fixtures: list[dict], horizon: int) -> pd.DataF
     return model.expected_points(events), events
 
 
-def _exclude_unavailable(scored: pd.DataFrame) -> pd.DataFrame:
+def _exclude_unavailable(scored: pd.DataFrame, keep_ids: list[int] | None = None) -> pd.DataFrame:
     """
-    Drop players who cannot play at all.
+    Drop players who cannot play at all, except any already owned.
 
     The model already prices doubt through availability, but a suspended or
     long-term-injured player with a strong prior can still surface with a
-    non-trivial horizon score, and there is no reason to own him now.
+    non-trivial horizon score, and there is no reason to buy him.
+
+    Owned players must survive the filter regardless. The optimiser funds
+    transfers from the selling prices of the squad it can see, so dropping an
+    injured player you own deletes his sale money from the budget along with
+    him - and quietly returns a worse plan than the one actually available.
     """
     before = len(scored)
-    out = scored[scored["status"].isin(["a", "d"])].copy()
+    keep = scored["status"].isin(["a", "d"])
+    if keep_ids:
+        keep = keep | scored["id"].isin(keep_ids)
+    out = scored[keep].copy()
     dropped = before - len(out)
     if dropped:
         logger.info("excluded %d unavailable players (injured/suspended/left)", dropped)
@@ -100,14 +108,15 @@ def main() -> int:
 
     bootstrap, fixtures = load_game_state(args.offline)
     scored, events = build_model(bootstrap, fixtures, args.horizon)
-    pool = _exclude_unavailable(scored)
+
+    owned = [int(s) for s in args.squad.split(",") if s.strip()] if args.squad else []
+    pool = _exclude_unavailable(scored, keep_ids=owned)
 
     opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next")
 
     if args.transfer:
-        if not args.squad:
+        if not owned:
             raise SystemExit("--transfer needs --squad with your current element ids")
-        owned = [int(s) for s in args.squad.split(",") if s.strip()]
         sol = opt.optimise_transfers(
             owned, bank=args.bank, free_transfers=args.free_transfers, max_hits=args.max_hits
         )

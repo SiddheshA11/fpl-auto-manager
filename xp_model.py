@@ -374,35 +374,53 @@ class XPModel:
                       left=BONUS_CURVE_PTS[0], right=BONUS_CURVE_PTS[-1])
         return pd.Series(b, index=bps90.index) * minutes_share
 
-    def _p_dc_award(self, dc90: pd.Series, position: pd.Series, minutes_share: pd.Series) -> pd.Series:
+    def _tail_probability(self, mu: np.ndarray, threshold: int) -> np.ndarray:
+        """P(X >= threshold) for a count with mean mu."""
+        k = self.config.dc_dispersion
+        mu = np.maximum(mu, 1e-9)
+        if k <= 1.0:
+            return 1.0 - poisson.cdf(threshold - 1, mu)
+        # Negative binomial with the requested variance/mean ratio.
+        from scipy.stats import nbinom
+        r = mu / (k - 1.0)
+        return 1.0 - nbinom.cdf(threshold - 1, r, r / (r + mu))
+
+    def _p_dc_award(
+        self, dc90: pd.Series, position: pd.Series, p_start: pd.Series, p_sub: pd.Series
+    ) -> pd.Series:
         """
         P(hits the defensive contribution threshold).
 
         A threshold event, so this needs the tail of a count distribution, not
-        a linear term on the rate. Modelling it linearly - which is the common
-        shortcut - overvalues players who accumulate steadily below the line
-        and undervalues those who spike past it.
+        a linear term on the rate. Modelling it linearly - the common shortcut -
+        overvalues players who accumulate steadily below the line and
+        undervalues those who spike past it.
+
+        The tail is evaluated separately for starting and substitute
+        appearances rather than once at average minutes. The tail is convex in
+        the rate, so by Jensen the probability at mean minutes is far below the
+        mean of the probabilities: a player who starts half the time was scored
+        at roughly a fifth of his true chance, silently underpricing every
+        rotation-risk defender in the pool.
         """
-        lam = (dc90.fillna(0.0) * minutes_share).clip(lower=0.0)
+        rate = dc90.fillna(0.0).clip(lower=0.0)
         out = pd.Series(0.0, index=dc90.index)
+
         for pos_id, thr in DC_THRESHOLD.items():
             if thr is None:
                 continue
             mask = position == pos_id
             if not mask.any():
                 continue
-            mu = lam[mask].to_numpy(dtype=float)
-            k = self.config.dc_dispersion
-            if k <= 1.0:
-                p = 1.0 - poisson.cdf(thr - 1, np.maximum(mu, 1e-9))
-            else:
-                # Negative binomial with the requested variance/mean ratio.
-                from scipy.stats import nbinom
-                mu_safe = np.maximum(mu, 1e-9)
-                r = mu_safe / (k - 1.0)
-                p = 1.0 - nbinom.cdf(thr - 1, r, r / (r + mu_safe))
-            out.loc[mask] = p
-        return out
+            r = rate[mask].to_numpy(dtype=float)
+            p_started = self._tail_probability(r * (STARTER_MINUTES / 90.0), thr)
+            p_benched = self._tail_probability(r * (SUB_MINUTES / 90.0), thr)
+            out.loc[mask] = (
+                p_start[mask].to_numpy(dtype=float) * p_started
+                + p_sub[mask].clip(lower=0.0).to_numpy(dtype=float) * p_benched
+            )
+
+        return out.clip(0.0, 1.0)
 
     # ---------- the estimate ----------
 
@@ -415,10 +433,18 @@ class XPModel:
         gf, ga = self._goal_expectations(team_id, opponent_id, is_home)
 
         # A player's historical per-90 rates were accumulated in his own team's
-        # average attacking context. Rescaling by this fixture's expectation
-        # relative to the league mean adjusts for the opponent without double
-        # counting his own team's quality, which is already inside the rate.
-        attack_mult = gf / max(self.priors.league_mean_goals, 1e-6)
+        # attacking context, so his club's quality is *already inside the rate*.
+        # The fixture adjustment must therefore carry only what is new: the
+        # opponent's defence and the venue. Dividing gf by the league mean
+        # alone leaves own_attack in the multiplier and applies it twice -
+        # inflating every Man City attacker by ~41% and deflating a good
+        # forward at a poor club by the same logic.
+        lm = max(self.priors.league_mean_goals, 1e-6)
+        t = self._team_strength(team_id)
+        own_attack = t.attack if t else 1.0
+        own_defence = t.defence if t else 1.0
+
+        attack_mult = gf / (lm * max(own_attack, 1e-6))
         minutes_share = mm["exp_minutes"] / 90.0
 
         # Appearance: 2 for 60+, 1 for anything less.
@@ -441,11 +467,16 @@ class XPModel:
         e_floor_half = float(np.sum(pmf * (ks // 2)))
         goals_conceded = mm["p60"] * e_floor_half * gc_pts.abs() * -1.0
 
-        # Saves scale with how much shooting the opponent does.
-        saves_rate = df["saves90"].fillna(0.0) * minutes_share * (ga / max(self.priors.league_mean_goals, 1e-6))
+        # Saves scale with how much shooting the opponent does. Same correction
+        # as the attack multiplier: saves90 already embeds his own defence, so
+        # only the opponent's attack and the venue may be applied here.
+        saves_mult = ga / (lm * max(own_defence, 1e-6))
+        saves_rate = df["saves90"].fillna(0.0) * minutes_share * saves_mult
         saves = saves_rate / 3.0 * float(self.scoring.get("saves", 1))
 
-        dc = self._p_dc_award(df["dc90"], pos, minutes_share) * self._pts("defensive_contribution", pos)
+        dc = self._p_dc_award(df["dc90"], pos, mm["p_start"], mm["p_appear"] - mm["p60"]) * self._pts(
+            "defensive_contribution", pos
+        )
 
         cards = df["yellow90"].fillna(0.0) * minutes_share * float(self.scoring.get("yellow_cards", -1))
 
@@ -506,7 +537,20 @@ class XPModel:
 
 
 def next_events(bootstrap: dict, n: int) -> list[int]:
-    """The next n gameweek ids that have not finished."""
+    """
+    The next n gameweeks to plan for.
+
+    Anchored on the gameweek FPL marks `is_next`, not on the first unfinished
+    one. A gameweek in progress is still unfinished, so during a midweek round
+    - or on any run that fires before the previous week is settled - filtering
+    on `finished` alone would return the *current* gameweek. Every downstream
+    quantity, captaincy and chip valuation included, would then quietly
+    describe a week whose deadline has already passed.
+    """
     events = sorted(bootstrap["events"], key=lambda e: e["id"])
-    upcoming = [e["id"] for e in events if not e.get("finished")]
-    return upcoming[:n]
+    nxt = next((e["id"] for e in events if e.get("is_next")), None)
+    if nxt is None:
+        nxt = next((e["id"] for e in events if not e.get("finished")), None)
+    if nxt is None:
+        return []
+    return [e["id"] for e in events if e["id"] >= nxt][:n]

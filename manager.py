@@ -126,15 +126,24 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next")
 
     logger.info("STEP 4: evaluating chips")
-    # Free hit and wildcard need a counterfactual squad, so solve for one.
-    free_hit = opt.build_squad(budget=bank + sum(selling.values()))
-    wildcard_gain = free_hit.squad_xp - float(
-        scored[scored["id"].isin(squad_ids)]["xp_horizon"].sum()
-    )
+    budget = bank + sum(selling.values())
 
     current = opt.optimise_transfers(
         squad_ids, bank=bank, free_transfers=free_transfers, selling_prices=selling, max_hits=max_hits
     )
+
+    # Wildcard is a horizon decision: it buys a squad you keep. Free hit is a
+    # one-week squad that reverts, so it must be optimised on the single
+    # gameweek it is played in - scoring a horizon-optimal squad on xp_next
+    # understates the achievable XI badly on exactly the double gameweek where
+    # a free hit is worth playing, so the chip would never trigger.
+    wildcard_squad = opt.build_squad(budget=budget)
+    free_hit_squad = SquadOptimizer(pool, value_col="xp_next", captain_col="xp_next").build_squad(budget=budget)
+
+    # Baseline the wildcard against the post-transfer squad, not the current
+    # one: the gain a free transfer would have captured anyway is not a reason
+    # to spend a wildcard.
+    wildcard_gain = wildcard_squad.squad_xp - current.squad_xp
     chip_engine = chips.ChipEngine(bootstrap, fixtures, scored)
     decision = chip_engine.evaluate(
         event_id,
@@ -142,15 +151,17 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         xi_ids=[int(i) for i in current.xi["id"]],
         bench_ids=[int(i) for i in current.bench["id"]],
         captain_id=current.captain,
-        free_hit_xi_xp=float(free_hit.xi["xp_next"].sum()),
+        free_hit_xi_xp=float(free_hit_squad.xi["xp_next"].sum()),
         wildcard_gain=wildcard_gain,
     )
     logger.info("chip decision: %s (%s)", decision.chip or "none", decision.reason)
 
     logger.info("STEP 5: planning transfers")
     if decision.chip in ("wildcard", "freehit"):
-        # Both give unlimited transfers, so the plan is simply the best squad.
-        plan = free_hit
+        # Both give unlimited transfers, so the plan is simply the best squad -
+        # but built on different objectives, since a wildcard squad is kept and
+        # a free hit squad is discarded after one gameweek.
+        plan = wildcard_squad if decision.chip == "wildcard" else free_hit_squad
         plan.transfers_in = sorted(set(int(i) for i in plan.squad["id"]) - set(squad_ids))
         plan.transfers_out = sorted(set(squad_ids) - set(int(i) for i in plan.squad["id"]))
         plan.hits = 0
@@ -176,8 +187,20 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
             free_hit=decision.chip == "freehit",
         )
         if ok is None:
-            logger.error("transfer submission failed; continuing with the existing squad")
-            plan = current
+            # The squad is still the old one, so the planned XI refers to
+            # players we do not own and FPL would reject it - leaving last
+            # week's lineup and captain in place, including any player who has
+            # since been injured. Re-optimise the eleven over what we actually
+            # hold instead.
+            logger.error("transfer submission failed; re-optimising the lineup over the current squad")
+            owned = scored[scored["id"].isin(squad_ids)].copy()
+            try:
+                plan = SquadOptimizer(owned, value_col="xp_next", captain_col="xp_next").build_squad(
+                    budget=float(owned["cost"].sum()) + 0.1
+                )
+            except (RuntimeError, ValueError) as e:
+                logger.critical("could not rebuild a lineup from the owned squad: %s", e)
+                return None
     elif dry_run:
         logger.info("[dry run] not submitting transfers")
 

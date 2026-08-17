@@ -160,8 +160,9 @@ def test_defensive_contribution_is_a_threshold_not_a_rate():
     """
     m = _model(pd.DataFrame({"position": [2, 2, 2]}))
     dc90 = pd.Series([4.0, 8.0, 16.0])
-    share = pd.Series([1.0, 1.0, 1.0])
-    p = m._p_dc_award(dc90, pd.Series([2, 2, 2]), share)
+    nailed = pd.Series([1.0, 1.0, 1.0])
+    no_sub = pd.Series([0.0, 0.0, 0.0])
+    p = m._p_dc_award(dc90, pd.Series([2, 2, 2]), nailed, no_sub)
 
     assert (p.diff().dropna() > 0).all(), "must increase with rate"
     assert p.iloc[0] < 0.10, "well below threshold should rarely fire"
@@ -172,8 +173,30 @@ def test_defensive_contribution_is_a_threshold_not_a_rate():
 
 def test_goalkeepers_never_earn_defensive_contribution():
     m = _model(pd.DataFrame({"position": [1]}))
-    p = m._p_dc_award(pd.Series([20.0]), pd.Series([1]), pd.Series([1.0]))
+    p = m._p_dc_award(pd.Series([20.0]), pd.Series([1]), pd.Series([1.0]), pd.Series([0.0]))
     assert p.iloc[0] == 0.0
+
+
+def test_defensive_contribution_uses_the_minutes_mixture_not_mean_minutes():
+    """
+    Regression: the tail was evaluated once at average minutes. It is convex in
+    the rate, so by Jensen that sits far below the mean of the probabilities -
+    a player starting half the time was priced at roughly a fifth of his true
+    chance. Every previous test used a full 90 minutes, which is precisely the
+    case where the bug disappears.
+    """
+    m = _model(pd.DataFrame({"position": [2]}))
+    rate, thr = pd.Series([11.0]), 10
+
+    rotated = m._p_dc_award(rate, pd.Series([2]), pd.Series([0.5]), pd.Series([0.0]))
+    nailed = m._p_dc_award(rate, pd.Series([2]), pd.Series([1.0]), pd.Series([0.0]))
+
+    # Half the starts must be worth half the nailed probability, not a fifth.
+    assert rotated.iloc[0] == pytest.approx(0.5 * nailed.iloc[0], rel=1e-6)
+
+    # And well above what evaluating the tail at mean minutes would have given.
+    at_mean_minutes = m._tail_probability(np.array([11.0 * (0.5 * 82.0) / 90.0]), thr)[0]
+    assert rotated.iloc[0] > 2 * at_mean_minutes
 
 
 def test_start_probability_normalised_to_eleven_shirts():
