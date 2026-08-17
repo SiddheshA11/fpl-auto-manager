@@ -431,20 +431,36 @@ class FPLClient:
             return team_data["transfers"].get("limit", 1)
         return 1
 
-    def get_chips_status(self) -> dict:
-        """Return which chips are available / played."""
-        team_data = self.get_my_team()
-        chips_played = {}
-        if team_data and "chips" in team_data:
-            for chip in team_data["chips"]:
-                # Use .get() since 'event' may not exist for unplayed chips
-                chip_name = chip.get("name")
-                chip_event = chip.get("event")
-                if chip_name and chip_event is not None:
-                    chips_played[chip_name] = chip_event
+    def get_chips_status(self, event: int | None = None) -> dict:
+        """
+        Which chips can be played in `event`.
 
-        all_chips = ["wildcard", "freehit", "bboost", "3xc"]
-        return {c: {"played": c in chips_played, "event": chips_played.get(c)} for c in all_chips}
+        Delegates to chips.available_chips because availability depends on the
+        gameweek: the game issues two of every chip, one for GW1-19 and one for
+        GW20-38. Treating a chip as spent forever once played - as this used to
+        - retires the second-half chip the moment the first-half one is used,
+        losing four chips over a season.
+        """
+        import chips as _chips
+
+        bootstrap = self.get_bootstrap()
+        team_data = self.get_my_team()
+
+        if event is None:
+            nxt = self.get_next_event()
+            event = int(nxt["id"]) if nxt else 1
+
+        available = _chips.available_chips(bootstrap, team_data, event)
+        played: dict[str, list[int]] = {}
+        for chip in (team_data or {}).get("chips", []) or []:
+            name, ev = chip.get("name"), chip.get("event")
+            if name and ev is not None:
+                played.setdefault(name, []).append(int(ev))
+
+        return {
+            name: {"available": name in available, "played_in": played.get(name, [])}
+            for name in sorted(_chips.CHIP_NAMES)
+        }
 
     # ──────────────── Team Modifications ────────────────
 
