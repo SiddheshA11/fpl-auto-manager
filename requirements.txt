@@ -1,5 +1,11 @@
 requests>=2.31.0
 numpy>=1.24.0
 pandas>=2.0.0
+# scipy provides both the HiGHS solver behind optimizer.py and the count
+# distributions the xP model uses; nothing else pulls in a solver.
+scipy>=1.9.0
+# GitHub secret encryption for refresh-token rotation.
 pynacl>=1.5.0
+# Browser automation for the FPL login flow in token_refresh.py.
 playwright>=1.40.0
+pytest>=7.0.0
