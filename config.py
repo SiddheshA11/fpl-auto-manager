@@ -61,3 +61,24 @@ STRATEGY = {
     # rate limited and the run dies mid-transfer.
     "request_delay": 1.0,
 }
+
+# How far to tilt the squad away from pure expected points, toward or against
+# the field. This one *is* runtime configuration rather than a model constant,
+# because it encodes a goal the model cannot infer: what winning means here.
+#
+#   0.0   maximise expected points, indifferent to what everyone else owns
+#   > 0   track the template, trading points for a lower chance of a bad week
+#   < 0   buy differentials, trading points for a higher chance of a great one
+#
+# Set negative because the target is a private league of roughly twenty people.
+# Beating a small, known field means overtaking it, and a squad that mirrors
+# the template finishes wherever captaincy luck puts it - the differentials are
+# the only thing that can move you up. Protecting overall rank among millions
+# is the opposite problem and would want this positive.
+#
+# At -0.3 the GW1 squad gives up 2.8 xP over five gameweeks against the
+# points-optimal build (176.3 vs 179.1) and drops mean ownership from 19.0% to
+# 12.4%. -0.6 costs 11.2 xP for a further 2 points of ownership, which is a bad
+# trade: it starts dropping genuinely best-in-class assets rather than swapping
+# between near-equals.
+OWNERSHIP_WEIGHT = float(os.environ.get("FPL_OWNERSHIP_WEIGHT", "-0.3"))

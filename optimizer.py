@@ -307,6 +307,7 @@ class SquadOptimizer:
         free_transfers: int = 1,
         selling_prices: dict[int, float] | None = None,
         max_hits: int = 2,
+        free_transfer_value: float = FREE_TRANSFER_VALUE,
     ) -> SquadSolution:
         """
         Best squad reachable from the current one, with hits priced honestly.
@@ -339,7 +340,13 @@ class SquadOptimizer:
         # consumes, so a move has to actually gain something to be worth making.
         # Owned players get a negative coefficient (keeping them avoids the
         # charge); the constant offset this introduces does not affect argmax.
-        objective[:n] += np.where(owned, -FREE_TRANSFER_VALUE, 0.0)
+        #
+        # Callers set this to zero when transfers are genuinely free - before
+        # the first deadline of the season, or under a wildcard - where no free
+        # transfer is being consumed and there is no option value to protect.
+        # Left at the default it would charge a fifteen-player rebuild 4.5 xP
+        # it does not owe, and bias the solver toward standing pat.
+        objective[:n] += np.where(owned, -free_transfer_value, 0.0)
 
         # One extra integer column: hits taken beyond the free allowance.
         objective = np.concatenate([objective, [TRANSFER_HIT]])  # minimised, so positive = penalty

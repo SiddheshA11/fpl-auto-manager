@@ -26,9 +26,10 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import chips
+import optimizer as optimizer_mod
 import priors
 import xp_model as X
-from config import FPL_TEAM_ID
+from config import FPL_TEAM_ID, OWNERSHIP_WEIGHT
 from fpl_client import FPLClient
 from optimizer import SquadOptimizer, format_squad
 
@@ -43,6 +44,33 @@ logging.basicConfig(
 logger = logging.getLogger("fpl_auto")
 
 HORIZON = 5
+
+
+def season_not_started(bootstrap: dict, event_id: int) -> bool:
+    """
+    True before the first deadline of the season, when transfers are free.
+
+    FPL charges nothing for any number of transfers until the Gameweek 1
+    deadline passes, which is the one week the entire squad can be rebuilt for
+    nothing. `manager.py` used to read `(limit or 1) - made` off the transfers
+    block, and FPL reports no numeric limit while transfers are unlimited - so
+    the bot concluded it had exactly one free transfer during the only week it
+    had unlimited ones, and would have made a single move and rolled the rest.
+
+    Deliberately decided from the fixture calendar rather than from the
+    transfers payload. The payload's shape in this state is precisely what has
+    never been observed, so keying the decision on it would be guessing again;
+    "the first gameweek of the season has not kicked off yet" is a fact the
+    bootstrap states plainly and cannot be wrong about.
+    """
+    events = bootstrap.get("events") or []
+    if not events:
+        return False
+    first = min(int(e["id"]) for e in events)
+    if event_id != first:
+        return False
+    opening = next((e for e in events if int(e["id"]) == first), None)
+    return bool(opening) and not opening.get("finished") and not opening.get("is_current")
 
 
 def _picks_payload(sol, chip: str | None) -> list[dict]:
@@ -107,7 +135,15 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     # - then takes what it prices as a free move for an actual -4.
     _transfers = my_team["transfers"]
     free_transfers = max(0, (_transfers.get("limit") or 1) - (_transfers.get("made") or 0))
-    if free_transfers == 0:
+    preseason = season_not_started(bootstrap, event_id)
+    if preseason:
+        # Every transfer is free until the deadline, so the ceiling is simply
+        # replacing all fifteen. Logged verbatim because this is the state whose
+        # payload shape has never been captured.
+        logger.info("pre-season: transfers are unlimited and free until the GW%d deadline", event_id)
+        logger.info("transfers block as reported by FPL: %s", _transfers)
+        free_transfers = 15
+    elif free_transfers == 0:
         logger.info("no free transfers left this gameweek; any move would cost a hit")
     squad_ids = [int(p["element"]) for p in my_team["picks"]]
     selling = {int(p["element"]): p["selling_price"] / 10.0 for p in my_team["picks"]}
@@ -131,13 +167,19 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     # Unavailable players are dropped from the buy pool but kept if already
     # owned, so an injured player still gets valued (near zero) for selling.
     pool = scored[scored["status"].isin(["a", "d"]) | scored["id"].isin(squad_ids)].copy()
-    opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next")
+    logger.info("ownership tilt: %+.2f (%s)", OWNERSHIP_WEIGHT,
+                "differentials" if OWNERSHIP_WEIGHT < 0
+                else "template" if OWNERSHIP_WEIGHT > 0 else "pure expected points")
+    opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
+                         ownership_weight=OWNERSHIP_WEIGHT)
 
     logger.info("STEP 4: evaluating chips")
     budget = bank + sum(selling.values())
 
     current = opt.optimise_transfers(
-        squad_ids, bank=bank, free_transfers=free_transfers, selling_prices=selling, max_hits=max_hits
+        squad_ids, bank=bank, free_transfers=free_transfers, selling_prices=selling,
+        max_hits=max_hits,
+        free_transfer_value=0.0 if preseason else optimizer_mod.FREE_TRANSFER_VALUE,
     )
 
     # Wildcard is a horizon decision: it buys a squad you keep. Free hit is a
@@ -146,7 +188,9 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     # understates the achievable XI badly on exactly the double gameweek where
     # a free hit is worth playing, so the chip would never trigger.
     wildcard_squad = opt.build_squad(budget=budget)
-    free_hit_squad = SquadOptimizer(pool, value_col="xp_next", captain_col="xp_next").build_squad(budget=budget)
+    free_hit_squad = SquadOptimizer(
+        pool, value_col="xp_next", captain_col="xp_next", ownership_weight=OWNERSHIP_WEIGHT
+    ).build_squad(budget=budget)
 
     # Baseline the wildcard against the post-transfer squad, not the current
     # one: the gain a free transfer would have captured anyway is not a reason
@@ -203,9 +247,10 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
             logger.error("transfer submission failed; re-optimising the lineup over the current squad")
             owned = scored[scored["id"].isin(squad_ids)].copy()
             try:
-                plan = SquadOptimizer(owned, value_col="xp_next", captain_col="xp_next").build_squad(
-                    budget=float(owned["cost"].sum()) + 0.1
-                )
+                plan = SquadOptimizer(
+                    owned, value_col="xp_next", captain_col="xp_next",
+                    ownership_weight=OWNERSHIP_WEIGHT,
+                ).build_squad(budget=float(owned["cost"].sum()) + 0.1)
             except (RuntimeError, ValueError) as e:
                 logger.critical("could not rebuild a lineup from the owned squad: %s", e)
                 return None
