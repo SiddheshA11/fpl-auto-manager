@@ -14,6 +14,11 @@ from config import (
 
 logger = logging.getLogger("fpl_auto")
 
+# Every outbound call gets a timeout. A hung request in an unattended run holds
+# the job open until the workflow times out, past the deadline it was meant to
+# beat.
+REQUEST_TIMEOUT = 30
+
 
 class FPLClient:
     """Authenticated client for the Fantasy Premier League API."""
@@ -31,6 +36,8 @@ class FPLClient:
             "Origin": "https://fantasy.premierleague.com",
         })
         self.authenticated = False
+        # Set when a rotated token could not be persisted; the caller surfaces it.
+        self.rotation_failed = False
         self._bootstrap_cache = None
         self._fixtures_cache = None
 
@@ -83,25 +90,37 @@ class FPLClient:
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            resp = requests.post(PINGONE_TOKEN_URL, data=payload, headers=headers)
-            
+            resp = requests.post(PINGONE_TOKEN_URL, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+
             if resp.status_code == 200:
                 token_data = resp.json()
                 access_token = token_data.get("access_token")
                 new_refresh_token = token_data.get("refresh_token")
-                
+
                 if access_token:
                     # Set the Bearer token for all future requests
                     self.session.headers["Authorization"] = f"Bearer {access_token}"
                     logger.info("Successfully refreshed access token")
-                    
-                    # Save the new refresh token for next time (token rotation)
+
+                    # Persist the rotated token. This is the linchpin of running
+                    # unattended: PingOne invalidates the old refresh token the
+                    # moment it issues a new one, so if the new one is not
+                    # stored, this run works and every future run is locked out
+                    # until a human re-issues a token by hand. Failing to store
+                    # it is therefore critical, not a warning to be swallowed.
                     if new_refresh_token:
-                        self._update_github_secret("FPL_REFRESH_TOKEN", new_refresh_token)
-                    
+                        if not self._update_github_secret("FPL_REFRESH_TOKEN", new_refresh_token):
+                            logger.critical(
+                                "ROTATION FAILED: a new refresh token was issued but could not be "
+                                "saved, so the old one is now spent. This run will finish, but the "
+                                "next one cannot authenticate until FPL_REFRESH_TOKEN is set by hand. "
+                                "Check that GH_PAT is present and unexpired."
+                            )
+                            self.rotation_failed = True
+
                     # Verify it works
                     verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
-                    verify_resp = self.session.get(verify_url)
+                    verify_resp = self.session.get(verify_url, timeout=REQUEST_TIMEOUT)
                     
                     if verify_resp.status_code == 200:
                         self.authenticated = True
@@ -132,7 +151,7 @@ class FPLClient:
         github_repo = os.environ.get("GITHUB_REPOSITORY")
         
         if not github_token or not github_repo:
-            logger.warning("GH_PAT/GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
+            logger.error("GH_PAT/GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
             return False
         
         try:
@@ -146,9 +165,9 @@ class FPLClient:
             }
             
             # Get public key for encryption
-            key_resp = requests.get(f"{api_base}/actions/secrets/public-key", headers=headers)
+            key_resp = requests.get(f"{api_base}/actions/secrets/public-key", headers=headers, timeout=REQUEST_TIMEOUT)
             if key_resp.status_code != 200:
-                logger.warning(f"Failed to get public key: {key_resp.status_code}")
+                logger.error(f"Failed to get GitHub public key: {key_resp.status_code} - {key_resp.text[:200]}")
                 return False
             
             key_data = key_resp.json()
@@ -166,21 +185,22 @@ class FPLClient:
                 json={
                     "encrypted_value": encrypted_b64,
                     "key_id": key_data["key_id"],
-                }
+                },
+                timeout=REQUEST_TIMEOUT,
             )
             
             if update_resp.status_code in (201, 204):
                 logger.info(f"Updated GitHub secret {secret_name} for token rotation")
                 return True
             else:
-                logger.warning(f"Failed to update secret: {update_resp.status_code}")
+                logger.error(f"Failed to update secret {secret_name}: {update_resp.status_code} - {update_resp.text[:200]}")
                 return False
                 
         except ImportError:
-            logger.warning("PyNaCl not installed, cannot rotate refresh token")
+            logger.error("PyNaCl not installed, cannot rotate refresh token")
             return False
         except Exception as e:
-            logger.warning(f"Failed to update GitHub secret: {e}")
+            logger.error(f"Failed to update GitHub secret {secret_name}: {e}")
             return False
 
 
