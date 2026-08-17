@@ -54,5 +54,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deadline-check-logs-${{ github.run_number }}
-          path: fpl_run_*.log
+          # deadline_check.py writes fpl_deadline_*.log; matching only
+          # fpl_run_*.log uploaded an empty artifact and left the one run whose
+          # output matters most with no record of what it changed.
+          path: |
+            fpl_deadline_*.log
+            fpl_run_*.log
           retention-days: 14
