@@ -83,6 +83,30 @@ this first: log in, hit `/api/me/`, and confirm the `entry` matches
 `FPL_TEAM_ID` was last set 2026-02-08 and has not been verified against the
 current account.
 
+## Running locally without breaking CI
+
+Refresh tokens rotate on use. Any local run — including `--dry-run` — consumes
+the stored token and receives a replacement, so a local run with only
+`FPL_REFRESH_TOKEN` set will leave the GitHub secret holding a spent token and
+CI locked out, while the local run itself reports success.
+
+Export `GH_PAT` and `GITHUB_REPOSITORY` alongside it so the rotated token is
+written back:
+
+```bash
+export FPL_TEAM_ID=5413589
+export GITHUB_REPOSITORY=SiddheshA11/fpl-auto-manager
+read -rs FPL_REFRESH_TOKEN && export FPL_REFRESH_TOKEN && echo
+read -rs GH_PAT && export GH_PAT && echo
+python3 manager.py --dry-run
+```
+
+`read -rs` keeps the values out of shell history and off the screen. If a run
+logs `ROTATION FAILED`, the stored token is spent: re-pull one from
+localStorage (`account.premierleague.com` session) and re-set the secret.
+
+There is no `.env` in a fresh clone; it is gitignored.
+
 ## Open work, highest priority first
 
 ### 0. Four of five workflows are disabled — nothing runs until they are back on
