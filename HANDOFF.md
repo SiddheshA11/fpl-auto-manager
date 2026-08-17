@@ -60,11 +60,28 @@ gameweeks exist to be worth it.
 
 ## Account
 
-The FPL account is **siddheshagarwal10@gmail.com**, not the `sa32@illinois.edu`
-address used for git commits. Confirmed from Premier League mail going back to
-2018, and from a password reset at 2026-02-08 22:27 UTC — three minutes before
-the `FPL_EMAIL` and `FPL_PASSWORD` GitHub secrets were created at 22:30 and
-22:31 the same evening.
+The project uses **siddheshagarwal10@gmail.com**. That is the owner's decision
+and the account every secret should correspond to.
+
+There are two Premier League accounts, and this caused real confusion on
+2026-08-17 — worth knowing about if authentication misbehaves:
+
+- Premier League mail going back to 2018 (account activation, email
+  confirmation, a password reset on 2026-02-08 minutes before `FPL_EMAIL` and
+  `FPL_PASSWORD` were created) lands in **siddheshagarwal10@gmail.com**.
+- A browser session captured that same day produced an id_token whose `email`
+  and `preferred_username` claims were **siddheshrox123@gmail.com**, with a
+  `sub` matching the `global_sso_id` cookie. A squad existed on that account.
+
+**The invariant that matters: `FPL_REFRESH_TOKEN` and `FPL_TEAM_ID` must come
+from the same account.** A token minted by one account against the other's team
+id returns 403 on `/api/my-team/{id}/`, which presents as an expired-token
+error and is easy to misdiagnose. If auth fails after a token refresh, check
+this first: log in, hit `/api/me/`, and confirm the `entry` matches
+`FPL_TEAM_ID`.
+
+`FPL_TEAM_ID` was last set 2026-02-08 and has not been verified against the
+current account.
 
 ## Open work, highest priority first
 
