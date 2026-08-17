@@ -1,0 +1,45 @@
+name: FPL Auto Manager - Dump My Team
+
+# Read-only capture of a real authenticated /my-team/ response, to settle the
+# payload shapes the code had only ever guessed at. Runs in CI rather than on a
+# laptop because PingOne rotates the refresh token on use: a local run consumes
+# the stored token and the replacement never reaches the GitHub secret.
+#
+# Manual dispatch only. This workflow issues no POST and cannot change the team.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  dump:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Dump /my-team/
+        env:
+          FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
+          FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python dump_my_team.py --out my_team_fixture.json
+
+      - name: Upload fixture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: my-team-fixture-${{ github.run_number }}
+          path: my_team_fixture.json
+          retention-days: 7
