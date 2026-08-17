@@ -35,6 +35,20 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # The historical dataset the xP model builds its priors from is
+      # gitignored (12MB, reproducible), so a fresh checkout has none. Without
+      # this step every per-90 rate falls back to zero and the run would submit
+      # a squad chosen by nothing. manager.py refuses to run on empty priors,
+      # so a fetch failure surfaces as a failed run rather than a bad team.
+      - name: Cache historical dataset
+        uses: actions/cache@v4
+        with:
+          path: data/history
+          key: fpl-history-${{ hashFiles('fetch_data.py') }}-v1
+
+      - name: Fetch priors and snapshot live data
+        run: python fetch_data.py
+
       - name: Run FPL Auto Manager
         env:
           FPL_EMAIL: ${{ secrets.FPL_EMAIL }}

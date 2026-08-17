@@ -24,6 +24,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # See weekly_run.yml: priors are gitignored, so they must be fetched
+      # before the model can score anything.
+      - name: Cache historical dataset
+        uses: actions/cache@v4
+        with:
+          path: data/history
+          key: fpl-history-${{ hashFiles('fetch_data.py') }}-v1
+
+      - name: Fetch priors
+        run: python fetch_data.py --skip-live
+
       - name: Run deadline check
         env:
           FPL_EMAIL: ${{ secrets.FPL_EMAIL }}

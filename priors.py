@@ -108,6 +108,30 @@ class PriorSet:
     def team_by_code(self, code: int) -> TeamStrength | None:
         return self.teams.get(code)
 
+    def validate(self, min_players: int = 200, min_teams: int = 15) -> None:
+        """
+        Refuse to run on priors too thin to model with.
+
+        Without this the failure is silent and expensive: an empty history
+        directory - the default on a fresh CI checkout, since the dataset is
+        gitignored - yields empty priors, every per-90 rate falls back to zero,
+        and the optimiser cheerfully submits a squad chosen by nothing at all.
+        Better to abort the run and keep last week's team.
+        """
+        problems = []
+        if self.players.empty or len(self.players) < min_players:
+            problems.append(f"only {len(self.players)} player priors (need {min_players})")
+        if self.positional is None or self.positional.empty:
+            problems.append("no positional means")
+        if len(self.teams) < min_teams:
+            problems.append(f"only {len(self.teams)} team strengths (need {min_teams})")
+
+        if problems:
+            raise RuntimeError(
+                "priors are unusable: " + "; ".join(problems)
+                + ". Run `python fetch_data.py` to populate data/history/."
+            )
+
 
 # ──────────────────────── loading ────────────────────────
 
