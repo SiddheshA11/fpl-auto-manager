@@ -48,6 +48,40 @@ DEFAULT_BENCH_WEIGHT = 0.15
 # squad for nothing.
 FREE_TRANSFER_VALUE = 0.3
 
+# Ownership tilt. Zero reproduces the pure expected-points objective exactly.
+#
+# Adding ownership as a *points* term is a mistake worth naming, because it is
+# the obvious thing to reach for: rank is driven by (my points - field points),
+# and the field's expected score is a constant, so it drops straight out of the
+# argmax. Maximising the mean differential is algebraically identical to
+# maximising points. Ownership only bites through variance.
+#
+# Exposure to a player is (owned - EO). Squaring it and using owned ∈ {0,1}:
+#
+#     exposure² = EO² + owned·(1 - 2·EO)
+#
+# which is linear in the decision variable, so it drops into the MILP without
+# any extra columns. The EO² term is a constant and is dropped.
+#
+# It enters as a multiplier on the player's expected points rather than as a
+# separate additive penalty:
+#
+#     adjusted value = value · (1 - weight·(1 - 2·EO))
+#
+# The additive form is the tempting one and it is wrong. Points reach the
+# objective at full rate for a starter and at `bench_weight` for a substitute,
+# so a penalty applied at full rate to squad membership exceeds a bench
+# player's entire contribution - and the solver responds by benching worthless
+# players to dodge it, which is how it produced a bench of 1.3-xP filler.
+# Scaling keeps the tilt proportional to the points actually at stake, so it
+# can never dominate them.
+#
+# Positive weight minimises exposure: it rewards owning a highly-owned player
+# and penalises owning a differential, tracking the field to protect rank.
+# Negative weight does the reverse and buys variance, which is what overtaking
+# a small league actually requires. See `ownership_weight` on SquadOptimizer.
+OWNERSHIP_WEIGHT = 0.0
+
 
 @dataclass
 class SquadSolution:
@@ -79,6 +113,8 @@ class SquadOptimizer:
         value_col: str = "xp_horizon",
         captain_col: str | None = None,
         bench_weight: float = DEFAULT_BENCH_WEIGHT,
+        ownership_weight: float = OWNERSHIP_WEIGHT,
+        ownership_col: str = "selected_by_percent",
     ):
         required = {"id", "position", "team", "cost", value_col}
         missing = required - set(players.columns)
@@ -102,6 +138,30 @@ class SquadOptimizer:
         self.position = self.players["position"].to_numpy(dtype=int)
         self.team = self.players["team"].to_numpy(dtype=int)
         self.ids = self.players["id"].to_numpy(dtype=int)
+
+        # `selected_by_percent` arrives from the API as a string, and is a
+        # percentage rather than a fraction. A missing column is not an error:
+        # it just means no tilt is available, so the objective stays pure xP.
+        self.ownership_weight = float(ownership_weight)
+        if ownership_col in self.players.columns:
+            eo = pd.to_numeric(self.players[ownership_col], errors="coerce")
+            self.ownership = (eo.fillna(0.0) / 100.0).clip(0.0, 1.0).to_numpy(dtype=float)
+        else:
+            if self.ownership_weight:
+                logger.warning(
+                    "ownership_weight=%.2f requested but column %r is absent; "
+                    "falling back to a pure expected-points objective",
+                    self.ownership_weight, ownership_col,
+                )
+            self.ownership = np.zeros(self.n, dtype=float)
+            self.ownership_weight = 0.0
+
+        # Clipped at zero so a weight above 1.0 cannot invert the sign of a
+        # player's value and turn the objective into "prefer players who score
+        # fewer points", which is never what any setting of this knob means.
+        self.risk_multiplier = np.clip(
+            1.0 - self.ownership_weight * (1.0 - 2.0 * self.ownership), 0.0, None
+        )
 
     # ---------- program construction ----------
     #
@@ -153,10 +213,15 @@ class SquadOptimizer:
             cons.append(LinearConstraint(block(squad=self.cost), 0, budget))
 
         # Maximise: starters at full value, bench at a fraction, captain doubled.
+        # The ownership tilt scales every block identically, so it re-weights
+        # players against each other without disturbing the balance between
+        # starting, benching and captaining any one of them.
+        value = self.value * self.risk_multiplier
+        captain_value = self.captain_value * self.risk_multiplier
         objective = np.concatenate([
-            -self.value * self.bench_weight,                      # owned (bench share)
-            -self.value * (1.0 - self.bench_weight),              # promoted to XI
-            -self.captain_value,                                  # captaincy doubles the score
+            -value * self.bench_weight,                           # owned (bench share)
+            -value * (1.0 - self.bench_weight),                   # promoted to XI
+            -captain_value,                                       # captaincy doubles the score
         ])
         return objective, cons
 
