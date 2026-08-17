@@ -100,7 +100,15 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         return None
 
     bank = my_team["transfers"].get("bank", 0) / 10.0
-    free_transfers = my_team["transfers"].get("limit", 1) or 1
+    # Subtract transfers already made this gameweek. The workflow can fire more
+    # than once per deadline (the scheduler's dedup file lives in /tmp on an
+    # ephemeral runner, and there is a separate cron fallback), and a second run
+    # that reads `limit` alone believes an already-spent transfer is still free
+    # - then takes what it prices as a free move for an actual -4.
+    _transfers = my_team["transfers"]
+    free_transfers = max(0, (_transfers.get("limit") or 1) - (_transfers.get("made") or 0))
+    if free_transfers == 0:
+        logger.info("no free transfers left this gameweek; any move would cost a hit")
     squad_ids = [int(p["element"]) for p in my_team["picks"]]
     selling = {int(p["element"]): p["selling_price"] / 10.0 for p in my_team["picks"]}
     logger.info("GW%d | bank £%.1fm | %d free transfer(s)", event_id, bank, free_transfers)
