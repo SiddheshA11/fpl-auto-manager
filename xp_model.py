@@ -53,6 +53,10 @@ DC_THRESHOLD = {1: None, 2: 10, 3: 12, 4: 12}
 # from too small a sample and is damped rather than trusted.
 DC_FACTOR_BOUNDS = (0.75, 1.35)
 
+# Penalty saves per goalkeeper appearance, measured across 2024-25 and
+# 2025-26. Worth ~3 points a season and previously not modelled at all.
+PENALTY_SAVE_RATE = 0.0163
+
 # Dispersion of the defensive-contribution count around a player's own rate.
 # Population variance/mean is ~2.0, but that is mostly *between* players; once
 # conditioned on a player's own rate the residual is ~1.3, and a plain Poisson
@@ -529,9 +533,17 @@ class XPModel:
         it at a high-possession one on a shift far smaller than the raw
         percentage suggests.
 
-        Only the prior is adjusted. Minutes played for the current club need no
-        correction - they were earned in the style being corrected for - so the
-        rescaling fades out as the season supplies real evidence.
+        The rescaling fades out as the season supplies real evidence, since
+        minutes played for the new club were earned in the style being corrected
+        for.
+
+        Note this is an approximation, not an exact decomposition. It scales the
+        *blended* rate by (1 + (ratio-1)*prior_share); exact would be
+        w*current + (1-w)*prior*ratio. The two agree at both endpoints and
+        differ by at most w*(1-w)*(ratio-1)*(current-prior) in between - about
+        5% at mid-season, always in the direction of over-applying. Left as is
+        because the blend's components are not retained separately by this
+        point, and the error is well inside the uncertainty on `ratio` itself.
         """
         dc90 = pd.to_numeric(df["dc90"], errors="coerce")
         factors = self.priors.team_dc_factor
@@ -704,7 +716,24 @@ class XPModel:
         # only the opponent's attack and the venue may be applied here.
         saves_mult = ga / (lm * max(own_defence, 1e-6))
         saves_rate = df["saves90"].fillna(0.0) * minutes_share * saves_mult
-        saves = saves_rate / 3.0 * float(self.scoring.get("saves", 1))
+        # E[floor(S/3)], not E[S]/3. The goals-conceded term eight lines below
+        # already does this correctly; the saves term did the naive thing and
+        # overpriced every keeper by +0.34 points per start (~13 a season,
+        # measured over 2,700 goalkeeper appearances of 60+ minutes). Because
+        # the bias is near-constant across keepers it never reordered them,
+        # which is why it survived - but it inflated every reported xi_xp and
+        # the bench keeper's contribution to the bench-boost valuation.
+        save_ks = np.arange(0, 16)
+        save_pmf = poisson.pmf(save_ks[None, :],
+                               np.maximum(saves_rate.to_numpy()[:, None], 1e-9))
+        saves = pd.Series((save_pmf * (save_ks // 3)).sum(axis=1), index=saves_rate.index)
+        saves = saves * float(self.scoring.get("saves", 1))
+
+        # Penalty saves were missing entirely: measured 0.0163 per goalkeeper
+        # appearance at 5 points each, ~+3 a season. Small, but it offsets part
+        # of the correction above, so the two belong together.
+        pen_save_pts = float(self.scoring.get("penalties_saved", 5))
+        saves = saves + (mm["p_appear"] * PENALTY_SAVE_RATE * pen_save_pts).where(pos == 1, 0.0)
 
         dc = self._p_dc_award(df["dc90"], pos, mm["p_start"], mm["p_appear"] - mm["p60"]) * self._pts(
             "defensive_contribution", pos

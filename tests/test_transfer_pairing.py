@@ -200,3 +200,46 @@ def test_the_weekly_run_submits_only_like_for_like_pairs(monkeypatch):
         f"{len(mismatched)} pair(s) swap position; FPL rejects the whole POST with "
         f"transfer_element_type_mismatch: {mismatched}"
     )
+
+
+def test_a_hit_is_priced_on_the_same_scale_as_the_value_it_is_compared_against():
+    """
+    TRANSFER_HIT is 4 real points; `xp_horizon` is a decay-weighted sum over
+    five gameweeks whose weights total ~3.64. Comparing the scalar against the
+    sum priced hits ~3.6x too cheap - a move gaining 1.1 points a gameweek
+    cleared a bar meant to require 4. On the committed fixture squad the old
+    scaling took 3 transfers and 2 hits (-8 points) where the corrected one
+    takes a single free transfer.
+    """
+    import json
+    from pathlib import Path
+
+    import priors
+    import xp_model as X
+    from optimizer import SquadOptimizer
+
+    snaps = Path(__file__).resolve().parent.parent / "data" / "snapshots"
+    bs = X.load_snapshot(sorted(snaps.glob("bootstrap-static_*.json.gz"), reverse=True)[0])
+    fx = X.load_snapshot(sorted(snaps.glob("fixtures_*.json.gz"), reverse=True)[0])
+    ps = priors.build_priors(current_team_codes={t["code"]: t["name"] for t in bs["teams"]})
+    scored = X.XPModel(bs, fx, ps, X.ModelConfig(horizon=5)).expected_points(X.next_events(bs, 5))
+
+    fixture = json.loads((Path(__file__).resolve().parent / "fixtures" / "my_team.json").read_text())
+    picks = fixture["my_team"]["picks"]
+    owned = [int(p["element"]) for p in picks]
+    selling = {int(p["element"]): p["selling_price"] / 10.0 for p in picks}
+    pool = scored[scored["status"].isin(["a", "d"]) | scored["id"].isin(owned)]
+
+    opt = SquadOptimizer(pool, "xp_horizon", "xp_next")
+    weight = sum(0.84 ** i for i in range(5))
+
+    cheap = opt.optimise_transfers(owned, bank=0.0, free_transfers=1,
+                                   selling_prices=selling, max_hits=2, horizon_weight=1.0)
+    correct = opt.optimise_transfers(owned, bank=0.0, free_transfers=1,
+                                     selling_prices=selling, max_hits=2, horizon_weight=weight)
+
+    assert cheap.hits > 0, "setup must be one where the mispriced hit was actually taken"
+    assert correct.hits < cheap.hits, (
+        f"hits still underpriced: {correct.hits} taken at the corrected scale "
+        f"vs {cheap.hits} at the broken one"
+    )

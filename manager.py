@@ -273,6 +273,9 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         squad_ids, bank=bank, free_transfers=free_transfers, selling_prices=selling,
         max_hits=max_hits,
         free_transfer_value=0.0 if preseason else optimizer_mod.FREE_TRANSFER_VALUE,
+        # The value column sums HORIZON gameweeks under decay, so the -4 has to
+        # be expressed on the same scale or hits look ~3.6x cheaper than they are.
+        horizon_weight=sum(X.ModelConfig(horizon=HORIZON).horizon_decay**i for i in range(HORIZON)),
     )
 
     # Wildcard is a horizon decision: it buys a squad you keep. Free hit is a

@@ -346,6 +346,7 @@ class SquadOptimizer:
         selling_prices: dict[int, float] | None = None,
         max_hits: int = 2,
         free_transfer_value: float = FREE_TRANSFER_VALUE,
+        horizon_weight: float = 1.0,
     ) -> SquadSolution:
         """
         Best squad reachable from the current one, with hits priced honestly.
@@ -387,7 +388,18 @@ class SquadOptimizer:
         objective[:n] += np.where(owned, -free_transfer_value, 0.0)
 
         # One extra integer column: hits taken beyond the free allowance.
-        objective = np.concatenate([objective, [TRANSFER_HIT]])  # minimised, so positive = penalty
+        #
+        # TRANSFER_HIT is 4 real points, but the value column it is weighed
+        # against is `xp_horizon` - a decay-weighted sum over the horizon whose
+        # weights total ~3.64 at the default settings. Comparing a scalar
+        # against that sum priced hits about 3.6x too cheap: a move gaining
+        # 1.1 points per gameweek cleared a bar meant to require 4.
+        #
+        # Scaling by the same weight restores the units. It is also the right
+        # decision rule: a transfer that could instead be made next week with
+        # the free allowance only buys you one gameweek of its own gain, so the
+        # hit has to beat four points in that single week, not across five.
+        objective = np.concatenate([objective, [TRANSFER_HIT * horizon_weight]])
         cons = [
             LinearConstraint(
                 np.hstack([np.atleast_2d(c.A), np.zeros((np.atleast_2d(c.A).shape[0], 1))]),

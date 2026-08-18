@@ -22,7 +22,7 @@ import pandas as pd
 
 import priors
 import xp_model as X
-from config import FPL_TEAM_ID
+from config import FPL_TEAM_ID, OWNERSHIP_WEIGHT
 from fpl_client import FPLClient
 from optimizer import SquadOptimizer, format_squad
 
@@ -90,12 +90,27 @@ def run_deadline_check(dry_run: bool = False) -> dict | None:
     else:
         logger.info("no new availability concerns in the squad")
 
-    # Re-pick the XI from the squad we already own. Budget is set high because
-    # no buying happens here; the squad is fixed and only the eleven changes.
-    opt = SquadOptimizer(squad, value_col="xp_next", captain_col="xp_next")
+    # Re-pick the XI from the squad we already own.
+    #
+    # Two things here must match the weekly run exactly, because this job's
+    # entire purpose is to make a *safety* adjustment to what that run
+    # submitted. Any difference in objective shows up as an unexplained lineup
+    # change hours before the deadline, indistinguishable from a real response
+    # to late news:
+    #
+    #   - the ownership tilt, which was omitted here and so ran at 0.0 while
+    #     the weekly run used config.OWNERSHIP_WEIGHT. Latent at the current
+    #     -0.3, but FPL_OWNERSHIP_WEIGHT is an environment variable and at
+    #     |w| >= 0.5 the two disagree on the eleven for no reason at all.
+    #   - optimise_lineup rather than build_squad. The squad is fixed, so this
+    #     is an ordering problem; build_squad re-solves a selection problem
+    #     against a budget equal to the squad's own cost, which is feasible
+    #     only by a hair and reports "infeasible" when it is not.
+    opt = SquadOptimizer(squad, value_col="xp_next", captain_col="xp_next",
+                         ownership_weight=OWNERSHIP_WEIGHT)
     try:
-        sol = opt.build_squad(budget=float(squad["cost"].sum()) + 0.1)
-    except RuntimeError as e:
+        sol = opt.optimise_lineup()
+    except (RuntimeError, ValueError) as e:
         logger.error("could not re-optimise the lineup: %s", e)
         return None
 
