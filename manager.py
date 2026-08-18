@@ -301,6 +301,10 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         captain_id=current.captain,
         free_hit_xi_xp=float(free_hit_squad.xi["xp_next"].sum()),
         wildcard_gain=wildcard_gain,
+        # Lets the planner value bench boost and triple captain in every
+        # gameweek of the window, not just this one, so a double gameweek two
+        # weeks out beats an ordinary week now.
+        squad_ids=[int(i) for i in current.squad["id"]],
     )
     logger.info("chip decision: %s (%s)", decision.chip or "none", decision.reason)
 

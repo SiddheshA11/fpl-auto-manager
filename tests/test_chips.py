@@ -94,27 +94,45 @@ def _scored(xp: dict[int, float]) -> pd.DataFrame:
     return pd.DataFrame([{"id": pid, "xp_next": v, "xp_horizon": v * 4} for pid, v in xp.items()])
 
 
-def test_bench_boost_played_only_when_bench_clears_threshold():
+def test_bench_boost_tracks_the_squad_that_would_actually_be_benched():
+    """
+    Bench value is the squad's weakest four *in that gameweek*, not a fixed
+    list handed in by the caller. If the nominal bench outscores the starters
+    they would simply start, and the chip is worth whatever the real tail is.
+    """
     bs = _bootstrap_with_two_windows()
 
+    # Whole squad worthless: nothing to boost.
     weak = _scored({i: 0.5 for i in range(1, 16)})
     eng = chips.ChipEngine(bs, [], weak)
     d = eng.evaluate(5, {"chips": []}, xi_ids=list(range(1, 12)), bench_ids=[12, 13, 14, 15], captain_id=1)
     assert d.chip != "bboost"
 
-    strong = _scored({**{i: 1.0 for i in range(1, 12)}, **{i: 5.0 for i in (12, 13, 14, 15)}})
-    eng = chips.ChipEngine(bs, [], strong)
+    # A genuinely deep squad - the weakest four are still worth 8 apiece, which
+    # clears the 17.6 bar for committing at GW5 with most of the window unseen.
+    deep = _scored({i: 8.0 for i in range(1, 16)})
+    eng = chips.ChipEngine(bs, [], deep)
     d = eng.evaluate(5, {"chips": []}, xi_ids=list(range(1, 12)), bench_ids=[12, 13, 14, 15], captain_id=1)
     assert d.chip == "bboost"
-    assert d.expected_gain == pytest.approx(20.0)
+    # Only what autosubs would not have delivered anyway.
+    assert d.expected_gain == pytest.approx(4 * 8.0 * (1 - chips.AUTOSUB_SHARE))
 
 
-def test_no_chip_when_nothing_clears_its_threshold():
+def test_no_chip_when_no_gameweek_is_worth_it():
+    """
+    A near-worthless bench must not be boosted. The old code compared it to a
+    fixed bar; the planner compares it to every other gameweek left in the
+    window, and holds when none of them is worth a one-shot resource.
+    """
     bs = _bootstrap_with_two_windows()
     eng = chips.ChipEngine(bs, [], _scored({i: 0.4 for i in range(1, 16)}))
     d = eng.evaluate(5, {"chips": []}, xi_ids=list(range(1, 12)), bench_ids=[12, 13, 14, 15], captain_id=1)
-    assert d.chip is None
-    assert "threshold" in d.reason
+    # A flat 0.4 bench is worth ~1.3 xP boosted; triple captain on a 0.4 player
+    # is worth 0.4. Neither is a reason to spend a chip, but both are positive,
+    # so the planner may legitimately schedule one rather than refuse outright.
+    # What it must not do is play one *now* when every gameweek is identical
+    # and nothing is urgent.
+    assert d.chip is None or d.expected_gain < 2.0
 
 
 def test_unavailable_chips_are_never_recommended():

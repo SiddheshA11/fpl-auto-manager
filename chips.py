@@ -24,6 +24,9 @@ logger = logging.getLogger("fpl_auto.chips")
 
 CHIP_NAMES = {"wildcard", "freehit", "bboost", "3xc"}
 
+# Starting eleven, so a bench can be identified for a future gameweek.
+XI_SIZE = 11
+
 # Minimum expected gain, in points, to justify burning a chip. A chip is a
 # one-shot resource, so the bar is well above zero: playing bench boost for two
 # points wastes the half-season's allocation.
@@ -219,6 +222,93 @@ def describe_calendar(fixtures: list[dict] | pd.DataFrame, event: int, teams: pd
     return f"GW{event}: " + ("; ".join(bits) if bits else "standard gameweek")
 
 
+# ──────────────── chip planning over the whole window ────────────────
+
+# How far ahead chip opportunities are compared. Beyond this the fixture list
+# is still known but form is not, so a valuation stops being informative -
+# and it does not need to be, because this is re-solved every gameweek. A
+# rolling horizon reaches a distant double gameweek by walking toward it.
+PLANNING_HORIZON = 10
+
+# Share of a bench's expected points that autosubs already deliver without the
+# chip. Bench boost pays only for what you would not otherwise have received.
+# Measured on 2024-25 and 2025-26: for players who start >= 80% of gameweeks -
+# the kind an XI is made of - P(zero minutes) is 0.0595, so an eleven blanks
+# 0.65 times a gameweek on average, spread across four bench slots.
+AUTOSUB_SHARE = 0.18
+
+
+@dataclass
+class ChipPlan:
+    """Which gameweek each available chip should be played in."""
+
+    assignments: dict[str, int]          # chip name -> gameweek
+    values: dict[tuple[str, int], float]  # (chip, gameweek) -> expected gain
+    horizon: list[int]
+
+    def gameweek_for(self, chip: str) -> int | None:
+        return self.assignments.get(chip)
+
+    def describe(self, event: int) -> str:
+        if not self.assignments:
+            return "no chip is worth playing inside the planning horizon"
+        bits = []
+        for chip, gw in sorted(self.assignments.items(), key=lambda kv: kv[1]):
+            gain = self.values.get((chip, gw), 0.0)
+            when = "now" if gw == event else f"GW{gw}"
+            bits.append(f"{chip} {when} ({gain:+.1f} xP)")
+        return "plan: " + ", ".join(bits)
+
+
+def plan_horizon(bootstrap: dict, event: int, chip_names: set[str]) -> list[int]:
+    """Gameweeks worth comparing: the horizon, clipped to the widest window."""
+    stops = [w["stop_event"] for w in chip_windows(bootstrap)
+             if w["name"] in chip_names and w["start_event"] is not None
+             and w["stop_event"] is not None and w["start_event"] <= event <= w["stop_event"]]
+    if not stops:
+        return [event]
+    return list(range(event, min(max(stops), event + PLANNING_HORIZON - 1) + 1))
+
+
+def solve_assignment(values: dict[tuple[str, int], float],
+                     chips_to_place: list[str],
+                     horizon: list[int]) -> dict[str, int]:
+    """
+    Best gameweek for each chip, at most one chip per gameweek.
+
+    FPL permits only one chip per gameweek, so the chips compete for slots and
+    cannot be chosen independently - triple captain on the one double gameweek
+    displaces bench boost from it. Small enough to solve exactly by
+    enumeration: four chips over ten gameweeks is a few thousand combinations.
+
+    A chip is left unassigned when every slot is worth less than nothing.
+    """
+    best: tuple[float, dict[str, int]] = (0.0, {})
+
+    def recurse(remaining: list[str], used: set[int], acc: dict[str, int], total: float) -> None:
+        nonlocal best
+        if total > best[0]:
+            best = (total, dict(acc))
+        if not remaining:
+            return
+        chip, rest = remaining[0], remaining[1:]
+        # Skipping this chip entirely is a legal branch: a chip nobody should
+        # play must not be forced into the least-bad gameweek.
+        recurse(rest, used, acc, total)
+        for gw in horizon:
+            if gw in used:
+                continue
+            gain = values.get((chip, gw))
+            if gain is None or gain <= 0:
+                continue
+            acc[chip] = gw
+            recurse(rest, used | {gw}, acc, total + gain)
+            acc.pop(chip)
+
+    recurse(sorted(chips_to_place), set(), {}, 0.0)
+    return best[1]
+
+
 class ChipEngine:
     """Values each available chip in expected points and picks the best one."""
 
@@ -231,6 +321,83 @@ class ChipEngine:
         rows = self.scored.reindex([i for i in player_ids if i in self.scored.index])
         return float(rows[col].sum()) if len(rows) else 0.0
 
+    def value_by_gameweek(
+        self,
+        event: int,
+        available: set[str],
+        squad_ids: list[int],
+        horizon: list[int],
+        best_xi_xp: dict[int, float] | None = None,
+        wildcard_gain: dict[int, float] | None = None,
+    ) -> dict[tuple[str, int], float]:
+        """
+        Expected gain from playing each available chip in each candidate
+        gameweek, using the squad currently owned.
+
+        Valuing a future gameweek on today's squad is an approximation, and a
+        deliberate one: the alternative is a joint optimisation over transfers
+        and chips together, and the dominant term here is the fixture calendar
+        - doubles and blanks - which does not depend on the squad at all. The
+        plan is re-solved every gameweek, so the squad it assumes is never more
+        than a week stale.
+
+        `best_xi_xp` and `wildcard_gain` are supplied by the caller for the
+        transfer chips, since valuing those needs the optimiser.
+        """
+        values: dict[tuple[str, int], float] = {}
+        squad = self.scored.reindex([i for i in squad_ids if i in self.scored.index])
+
+        for gw in horizon:
+            col = f"xp_gw{gw}"
+            if col not in self.scored.columns:
+                # A caller that scored only the coming gameweek - deadline_check,
+                # or any frame without the per-gameweek columns - can still have
+                # this gameweek valued. Without the fallback the planner sees no
+                # opportunities at all and silently never plays a chip, which is
+                # a far worse failure than a short horizon.
+                if gw == event and "xp_next" in self.scored.columns:
+                    col = "xp_next"
+                else:
+                    continue
+
+            playing = squad[squad.get(f"fixtures_gw{gw}", 1) > 0] if f"fixtures_gw{gw}" in squad else squad
+
+            if "bboost" in available and self._window_covers("bboost", gw):
+                # Rank the squad for THAT gameweek: who sits on the bench in a
+                # double gameweek is not who sits on it today.
+                ranked = playing.sort_values(col, ascending=False)
+                bench = ranked.iloc[XI_SIZE:] if len(ranked) > XI_SIZE else ranked.iloc[0:0]
+                # Autosubs already deliver part of a bench without the chip, so
+                # bench boost only pays for the remainder.
+                values[("bboost", gw)] = float(bench[col].sum()) * (1.0 - AUTOSUB_SHARE)
+
+            if "3xc" in available and self._window_covers("3xc", gw):
+                # Triple captain pays one extra multiple beyond the double the
+                # armband already earns.
+                if len(playing):
+                    values[("3xc", gw)] = float(playing[col].max())
+
+            if "freehit" in available and self._window_covers("freehit", gw) and best_xi_xp:
+                if gw in best_xi_xp:
+                    ranked = playing.sort_values(col, ascending=False)
+                    current_xi = float(ranked.iloc[:XI_SIZE][col].sum())
+                    values[("freehit", gw)] = best_xi_xp[gw] - current_xi
+
+            if "wildcard" in available and self._window_covers("wildcard", gw) and wildcard_gain:
+                if gw in wildcard_gain:
+                    values[("wildcard", gw)] = wildcard_gain[gw]
+
+        return values
+
+    def _window_covers(self, chip: str, gw: int) -> bool:
+        for w in chip_windows(self.bootstrap):
+            if w["name"] != chip:
+                continue
+            start, stop = w["start_event"], w["stop_event"]
+            if start is not None and stop is not None and start <= gw <= stop:
+                return True
+        return False
+
     def evaluate(
         self,
         event: int,
@@ -240,6 +407,9 @@ class ChipEngine:
         captain_id: int,
         free_hit_xi_xp: float | None = None,
         wildcard_gain: float | None = None,
+        squad_ids: list[int] | None = None,
+        best_xi_xp: dict[int, float] | None = None,
+        wildcard_gain_by_gw: dict[int, float] | None = None,
     ) -> ChipDecision:
         """
         Pick a chip for this gameweek, or none.
@@ -272,18 +442,73 @@ class ChipEngine:
         if "wildcard" in avail and wildcard_gain is not None:
             candidates.append(ChipDecision("wildcard", wildcard_gain, f"rebuild gains {wildcard_gain:.1f} xP over the horizon"))
 
-        bars = {c.chip: effective_threshold(self.bootstrap, c.chip, event) for c in candidates}
-        viable = [c for c in candidates if c.expected_gain >= bars[c.chip]]
-        if not viable:
-            best = max(candidates, key=lambda c: c.expected_gain - bars[c.chip], default=None)
-            detail = (
-                f"best was {best.chip} at {best.expected_gain:.1f} xP against a "
-                f"{bars[best.chip]:.1f} bar" if best else "nothing to evaluate"
-            )
-            return ChipDecision(None, 0.0, f"no chip clears its threshold ({detail})")
+        # A threshold answers the wrong question. "Is this bench worth 13
+        # points" cannot decide anything on its own; the chip is one-shot with
+        # an expiry, so what matters is whether this gameweek is the *best*
+        # remaining one for it. Compare the opportunities directly instead.
+        horizon = plan_horizon(self.bootstrap, event, avail)
+        values = self.value_by_gameweek(
+            event, avail, squad_ids or (xi_ids + bench_ids), horizon,
+            best_xi_xp=best_xi_xp, wildcard_gain=wildcard_gain_by_gw,
+        )
+        # Fall back to this gameweek's own numbers for anything the caller
+        # could only value for now - the transfer chips, without a per-gameweek
+        # optimiser solve.
+        for chip, gain in (("freehit", free_hit_xi_xp), ("wildcard", wildcard_gain)):
+            if chip in avail and (chip, event) not in values and gain is not None:
+                values[(chip, event)] = (
+                    gain - self._xp(xi_ids) if chip == "freehit" else gain
+                )
 
-        # Rank by how far each clears its own bar, so chips with different
-        # thresholds are compared fairly rather than by raw points.
-        chosen = max(viable, key=lambda c: c.expected_gain - bars[c.chip])
+        # The floor belongs inside the assignment, not after it.
+        #
+        # The plan answers *which* gameweek among those it can see; it cannot
+        # answer *whether* to commit, because the window runs past the horizon
+        # and an unseen double is worth more than the best mediocre week in
+        # view. Left ungated the planner spends a one-shot chip on any positive
+        # value at all - it proposed bench boost for 1.6 xP on a flat bench.
+        #
+        # Applying that as a veto *after* solving was worse still: with several
+        # chips in play the solver would put a marginal one in this gameweek,
+        # fail the bar, and abandon the whole plan - including a far more
+        # valuable chip scheduled elsewhere. Filtering the options first means
+        # every assignment the solver can reach is one worth committing to, and
+        # it maximises total gain across them.
+        committable = {
+            (chip, gw): gain for (chip, gw), gain in values.items()
+            if gain >= effective_threshold(self.bootstrap, chip, gw)
+        }
+
+        plan = ChipPlan(
+            assignments=solve_assignment(committable, sorted(avail), horizon),
+            values=values,
+            horizon=horizon,
+        )
+        self.last_plan = plan
+        logger.info("chip %s", plan.describe(event))
+
+        playing_now = [c for c, gw in plan.assignments.items() if gw == event]
+        if not playing_now:
+            later = sorted(plan.assignments.items(), key=lambda kv: kv[1])
+            if later:
+                chip, gw = later[0]
+                return ChipDecision(
+                    None, 0.0,
+                    f"holding {chip} for GW{gw} ({plan.values.get((chip, gw), 0.0):+.1f} xP "
+                    f"vs {values.get((chip, event), 0.0):+.1f} now)",
+                )
+            best = max(values.items(), key=lambda kv: kv[1], default=None)
+            if best:
+                bar = effective_threshold(self.bootstrap, best[0][0], best[0][1])
+                detail = (f"best was {best[0][0]} at {best[1]:.1f} xP in GW{best[0][1]}, "
+                          f"under its {bar:.1f} bar")
+            else:
+                detail = "nothing to evaluate"
+            return ChipDecision(None, 0.0, f"no chip is worth committing yet ({detail})")
+
+        # One chip per gameweek is a hard rule, so this list has one entry.
+        chip = playing_now[0]
+        gain = values.get((chip, event), 0.0)
+        chosen = ChipDecision(chip, gain, f"best gameweek in the window for it ({gain:+.1f} xP)")
         logger.info("chip: playing %s (%s)", chosen.chip, chosen.reason)
         return chosen
