@@ -99,6 +99,50 @@ def _picks_payload(sol, chip: str | None) -> list[dict]:
     return payload
 
 
+def _reoptimise_lineup(plan, scored: pd.DataFrame):
+    """
+    Re-pick the XI, captain and bench order over the squad in `plan`.
+
+    Returns the plan unchanged if anything goes wrong. A worse-ordered lineup
+    is a fraction of a point; no lineup at all is the whole gameweek, and this
+    runs unattended minutes before a deadline.
+    """
+    squad_ids = [int(i) for i in plan.squad["id"]]
+    owned = scored[scored["id"].isin(squad_ids)].copy()
+    if len(owned) != len(squad_ids):
+        logger.warning("could not score every owned player; keeping the horizon lineup")
+        return plan
+
+    try:
+        lineup = SquadOptimizer(
+            owned, value_col="xp_next", captain_col="xp_next",
+            ownership_weight=OWNERSHIP_WEIGHT,
+        ).optimise_lineup()
+    except (RuntimeError, ValueError) as e:
+        logger.warning("lineup re-optimisation failed (%s); keeping the horizon lineup", e)
+        return plan
+
+    before = float(plan.xi["xp_next"].sum()) if "xp_next" in plan.xi.columns else None
+    after = float(lineup.xi["xp_next"].sum())
+    if before is not None:
+        if after < before - 1e-6:
+            # Cannot happen for a correct solve over the same fifteen, so if it
+            # does the solve is wrong rather than merely unlucky.
+            logger.warning(
+                "lineup re-optimisation scored worse (%.2f vs %.2f); keeping the horizon lineup",
+                after, before,
+            )
+            return plan
+        logger.info("lineup re-optimised on GW xP: %.2f -> %.2f (%+.2f)", before, after, after - before)
+
+    plan.xi = lineup.xi
+    plan.bench = lineup.bench
+    plan.captain = lineup.captain
+    plan.vice_captain = lineup.vice_captain
+    plan.xi_xp = float(lineup.xi["xp_next"].sum())
+    return plan
+
+
 def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
@@ -258,6 +302,14 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         logger.info("[dry run] not submitting transfers")
 
     logger.info("STEP 6: submitting lineup")
+
+    # Which fifteen to own is a horizon decision; which eleven to start is a
+    # decision about this Saturday. The squad solve answers both with the
+    # horizon column, which benches players who are worth more *this* gameweek
+    # than the starters ahead of them. Re-solve the eleven over the squad we
+    # now hold, scored on the coming gameweek alone.
+    plan = _reoptimise_lineup(plan, scored)
+
     lineup_chip = decision.chip if decision.chip in ("bboost", "3xc") else None
     picks = _picks_payload(plan, lineup_chip)
 

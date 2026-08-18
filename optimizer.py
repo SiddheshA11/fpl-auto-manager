@@ -300,6 +300,34 @@ class SquadOptimizer:
         )
         return sol
 
+    def optimise_lineup(self) -> SquadSolution:
+        """
+        Best XI, captain and bench order over a squad that is already owned.
+
+        Which fifteen to own is a horizon decision - you keep them for weeks -
+        but which eleven to start is a decision about one gameweek, and the
+        joint solve answered both with the same column. That is how a defender
+        worth 3.95 points this Saturday ended up on the bench behind a
+        midfielder worth 3.46, because the midfielder was worth more across the
+        next five. Roughly half a point a gameweek, every gameweek.
+
+        So the squad keeps its horizon objective and the lineup is re-solved
+        here on the coming gameweek alone. Construct the optimiser with
+        `value_col` set to the next-gameweek column to use it.
+        """
+        if self.n != SQUAD_SIZE:
+            raise ValueError(
+                f"optimise_lineup needs exactly the owned {SQUAD_SIZE}, got {self.n}"
+            )
+        # Every player is already owned, so the budget cannot bind. It is still
+        # passed because the squad constraints are shared with build_squad.
+        budget = float(self.cost.sum())
+        objective, cons = self._base_program(budget)
+        res = self._solve(objective, cons)
+        if not res.success:
+            raise RuntimeError(f"lineup optimisation failed: {res.message}")
+        return self._build_solution(res, budget)
+
     def optimise_transfers(
         self,
         current_squad_ids: list[int],
