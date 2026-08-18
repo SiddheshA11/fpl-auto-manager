@@ -188,14 +188,51 @@ def load_season(season: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] 
 # ──────────────────────── player priors ────────────────────────
 
 
+def _with_element_type(gw: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Return the frame with a usable integer `element_type`, or None.
+
+    The historical dataset is third-party and its schema drifts: `position` is
+    a name in some seasons, an integer in others, and `element_type` is present
+    directly in others again. Assuming one of those shapes crashed a CI run on
+    a freshly fetched copy while passing against the copy already on disk, so
+    all three are handled and an unrecognisable season is skipped rather than
+    raising.
+    """
+    df = gw.copy()
+    if "element_type" in df.columns and df["element_type"].notna().any():
+        df["element_type"] = pd.to_numeric(df["element_type"], errors="coerce")
+        return df
+    if "position" not in df.columns:
+        return None
+    # `dtype == object` is not the test it looks like. pandas 3 gives text
+    # columns a dedicated string dtype, so that comparison is False for exactly
+    # the case it was written to catch, and CI installs pandas 3 while this
+    # machine has 2.2. Asking whether the column is *numeric* is the same
+    # question and survives both.
+    if not pd.api.types.is_numeric_dtype(df["position"]):
+        df["element_type"] = df["position"].map(POSITION_IDS)
+    else:
+        df["element_type"] = pd.to_numeric(df["position"], errors="coerce")
+    if df["element_type"].isna().all():
+        return None
+    return df
+
+
+
+
 def _aggregate_player_season(gw: pd.DataFrame) -> pd.DataFrame:
     """Sum a season's per-gameweek rows into per-player totals."""
     gw = gw.copy()
 
     # Position arrives as a string in merged_gw; normalise to the FPL integer.
-    if "position" in gw.columns and gw["position"].dtype == object:
-        gw["element_type"] = gw["position"].map(POSITION_IDS)
-    gw["element_type"] = gw.get("element_type", pd.Series(np.nan, index=gw.index))
+    # Shared with the DC factors so there is one place that knows how this
+    # column can be shaped. The dtype check this used to make silently failed
+    # under pandas 3, leaving every player prior with a NaN position - which
+    # empties the positional means the model falls back on and quietly
+    # degrades every rate in the system.
+    typed = _with_element_type(gw)
+    gw = typed if typed is not None else gw.assign(element_type=np.nan)
 
     # Columns the dataset gained partway through its life (defensive_contribution
     # only exists from 2025-26, expected_* from 2022-23). A season that predates
@@ -395,32 +432,6 @@ def build_player_priors(seasons: list[str] | None = None) -> tuple[pd.DataFrame,
     shrunk["start_confidence"] = (shrunk["eff_gameweeks"] / (shrunk["eff_gameweeks"] + SHRINKAGE_GAMEWEEKS)).clip(0, 1)
     logger.info("priors: built %d player priors from %d seasons", len(shrunk), len(frames))
     return shrunk, positional
-
-
-def _with_element_type(gw: pd.DataFrame) -> pd.DataFrame | None:
-    """
-    Return the frame with a usable integer `element_type`, or None.
-
-    The historical dataset is third-party and its schema drifts: `position` is
-    a name in some seasons, an integer in others, and `element_type` is present
-    directly in others again. Assuming one of those shapes crashed a CI run on
-    a freshly fetched copy while passing against the copy already on disk, so
-    all three are handled and an unrecognisable season is skipped rather than
-    raising.
-    """
-    df = gw.copy()
-    if "element_type" in df.columns and df["element_type"].notna().any():
-        df["element_type"] = pd.to_numeric(df["element_type"], errors="coerce")
-        return df
-    if "position" not in df.columns:
-        return None
-    if df["position"].dtype == object:
-        df["element_type"] = df["position"].map(POSITION_IDS)
-    else:
-        df["element_type"] = pd.to_numeric(df["position"], errors="coerce")
-    if df["element_type"].isna().all():
-        return None
-    return df
 
 
 # ──────────────── defensive contribution, by club ────────────────

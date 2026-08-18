@@ -183,3 +183,46 @@ def test_position_schema_variants_are_all_understood(frame, expected):
 def test_an_unusable_season_is_skipped_not_raised(frame):
     """A schema we cannot read must degrade the priors, never break the run."""
     assert priors._with_element_type(pd.DataFrame(frame)) is None
+
+
+def test_position_survives_the_pandas_3_string_dtype():
+    """
+    Regression, and the expensive one.
+
+    `dtype == object` is not the test it appears to be. pandas 3 gives text
+    columns a dedicated string dtype, so the comparison is False for precisely
+    the case it was written to catch. CI installs pandas 3 while development
+    happens on 2.2, so this passed locally and silently broke in CI: every
+    player prior lost its position, which empties the positional means the
+    model falls back on and degrades every rate in the system.
+
+    The visible symptom was a squad worth 24.7 XI xP instead of 47.6, leaving
+    £7.5m unspent and captaining a goalkeeper. It reached a dry run and not a
+    live submission by luck of sequencing, not by design.
+    """
+    for dtype in ("object", "string"):
+        df = pd.DataFrame({"position": pd.Series(["GK", "DEF", "MID", "FWD"], dtype=dtype)})
+        out = priors._with_element_type(df)
+        assert out is not None, f"{dtype} column was rejected outright"
+        assert list(out["element_type"]) == [1, 2, 3, 4], (
+            f"positions were not mapped under the {dtype} dtype"
+        )
+
+
+def test_aggregation_keeps_positions_under_either_dtype():
+    """The same guarantee at the level that actually feeds the priors."""
+    base = pd.DataFrame({
+        "code": [1, 1, 2, 2],
+        "element": [10, 10, 20, 20],
+        "minutes": [90, 90, 90, 90],
+        "total_points": [2, 3, 4, 5],
+        "position": ["MID", "MID", "DEF", "DEF"],
+    })
+    for dtype in ("object", "string"):
+        df = base.copy()
+        df["position"] = df["position"].astype(dtype)
+        agg = priors._aggregate_player_season(df)
+        assert agg["element_type"].notna().all(), (
+            f"positions were lost during aggregation under the {dtype} dtype"
+        )
+        assert set(agg["element_type"]) == {3, 2}
