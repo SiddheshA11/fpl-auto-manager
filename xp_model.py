@@ -104,7 +104,27 @@ OUTFIELD_COMPETITION_ALPHA = 1.5
 
 STARTER_MINUTES = 82.0      # mean minutes for a player who starts
 SUB_MINUTES = 18.0          # mean minutes for a player who comes off the bench
-P60_GIVEN_START = 0.92      # a starter reaching the 60-minute appearance bonus
+# Minutes a starter plays, and his chance of reaching the 60-minute appearance
+# bonus, BY POSITION. Both were single pooled numbers - 82.0 and 0.92 - which
+# are accurate as averages and wrong for everyone: the error is the pooling,
+# not the measurement.
+#
+# Measured over 2024-25 and 2025-26 separately; the two seasons agree to a
+# tenth of a minute, so this is a property of how the positions are used
+# rather than one season's noise.
+#
+#   GK 89.6' / 0.993    DEF 85.1' / 0.944    MID 79.9' / 0.908    FWD 78.8' / 0.919
+#
+# It matters more than one constant should, because starter minutes feed the
+# appearance points, the clean-sheet gate through p60, the defensive
+# contribution tail and the saves term all at once. The DEF award rate for
+# defensive contribution is 26.4% per start; the Poisson tail at 82 minutes
+# gives 20.2% and at the true 85.1 gives 25.0% - so most of what looked like a
+# mis-shaped tail was this constant.
+STARTER_MINUTES_BY_POSITION = {1: 89.6, 2: 85.1, 3: 79.9, 4: 78.8}
+P60_BY_POSITION = {1: 0.993, 2: 0.944, 3: 0.908, 4: 0.919}
+
+P60_GIVEN_START = 0.92      # pooled fallback, when position is unknown
 
 # P(appears | did not start), as a function of how likely he was to start.
 # Measured over 57,362 player-gameweeks across 2024-25 and 2025-26; the
@@ -113,6 +133,27 @@ SUB_RATE_BY_START = (
     [0.00, 0.05, 0.15, 0.30, 0.50, 0.70, 0.90, 1.00],
     [0.03, 0.034, 0.231, 0.330, 0.361, 0.436, 0.398, 0.35],
 )
+
+# ...and that curve was fitted pooled across positions, so it fits the average
+# and therefore nobody. Measured P(appear | did not start): DEF 0.116, MID
+# 0.206, FWD 0.234, against a pooled outfield rate of 0.176. A forward is a
+# third more likely to come off the bench than the pool implies and a defender
+# a third less, which is most of the model's underprediction of forwards.
+SUB_RATE_POSITION_MULTIPLIER = {1: 1.0, 2: 0.659, 3: 1.169, 4: 1.329}
+
+# FPL assists are not Opta expected assists, and the gap is large, positional
+# and stable. FPL credits an assist for rebounds, deflections and won
+# penalties, so its definition is simply broader than the one xA models.
+# Measured actual-assists / xA:
+#
+#   season     DEF    MID    FWD    all
+#   2024-25   1.107  1.371  2.077  1.374
+#   2025-26   1.292  1.325  2.105  1.379
+#
+# The league-wide figure reproduces to three decimals across two seasons, and
+# forwards earn over twice the assists their xA implies. Pricing assists at
+# 3 * xA therefore understates every attacker, forwards worst.
+ASSIST_PER_XA = {1: 1.20, 2: 1.20, 3: 1.35, 4: 2.09}
 # Keepers essentially never appear off the bench: measured 0.0036 over 4,776
 # non-start goalkeeper gameweeks. A substitute keeper means an injury or a red
 # card to the first choice.
@@ -557,11 +598,14 @@ class XPModel:
         sub_rate = pd.Series(
             np.interp(p_start, SUB_RATE_BY_START[0], SUB_RATE_BY_START[1]),
             index=df.index,
-        ).where(df["position"] != 1, GK_SUB_RATE)
+        ) * df["position"].map(SUB_RATE_POSITION_MULTIPLIER).fillna(1.0)
+        sub_rate = sub_rate.where(df["position"] != 1, GK_SUB_RATE)
         p_sub = avail * (1.0 - p_start) * sub_rate
         p_appear = (p_start + p_sub).clip(0.0, 1.0)
-        p60 = (p_start * P60_GIVEN_START).clip(0.0, 1.0)
-        exp_minutes = p_start * STARTER_MINUTES + p_sub * SUB_MINUTES
+        starter_minutes = df["position"].map(STARTER_MINUTES_BY_POSITION).fillna(STARTER_MINUTES)
+        p60_given_start = df["position"].map(P60_BY_POSITION).fillna(P60_GIVEN_START)
+        p60 = (p_start * p60_given_start).clip(0.0, 1.0)
+        exp_minutes = p_start * starter_minutes + p_sub * SUB_MINUTES
 
         frame = pd.DataFrame({
             "availability": avail,
@@ -763,7 +807,8 @@ class XPModel:
             if not mask.any():
                 continue
             r = rate[mask].to_numpy(dtype=float)
-            p_started = self._tail_probability(r * (STARTER_MINUTES / 90.0), thr)
+            starter_mins = STARTER_MINUTES_BY_POSITION.get(pos_id, STARTER_MINUTES)
+            p_started = self._tail_probability(r * (starter_mins / 90.0), thr)
             p_benched = self._tail_probability(r * (SUB_MINUTES / 90.0), thr)
             out.loc[mask] = (
                 p_start[mask].to_numpy(dtype=float) * p_started
@@ -804,7 +849,12 @@ class XPModel:
         appearance = mm["p60"] * long_play + (mm["p_appear"] - mm["p60"]).clip(lower=0) * short_play
 
         goals = df["xg90"].fillna(0.0) * minutes_share * attack_mult * self._pts("goals_scored", pos)
-        assists = df["xa90"].fillna(0.0) * minutes_share * attack_mult * self._pts("assists", pos)
+        # xA counts chances created as a goal-probability; FPL counts assists,
+        # and its definition is broader (rebounds, deflections, won penalties).
+        # Measured ratio is 1.20 for defenders, 1.35 for midfielders and 2.09
+        # for forwards, reproducing across both seasons.
+        assist_rate = df["xa90"].fillna(0.0) * pos.map(ASSIST_PER_XA).fillna(1.0)
+        assists = assist_rate * minutes_share * attack_mult * self._pts("assists", pos)
 
         # Clean sheet requires 60 minutes, so it is gated on p60 not p_appear.
         p_cs = float(np.exp(-ga))
