@@ -325,15 +325,25 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         logger.info("  no transfer improves the squad; rolling the free transfer")
 
     if not dry_run and plan.transfers_in:
-        ok = client.make_transfers(
-            transfers_in=plan.transfers_in,
-            transfers_out=plan.transfers_out,
-            prices_in=[int(scored.loc[scored["id"] == i, "cost"].iloc[0] * 10) for i in plan.transfers_in],
-            prices_out=[int(selling.get(i, 0) * 10) for i in plan.transfers_out],
-            wildcard=decision.chip == "wildcard",
-            free_hit=decision.chip == "freehit",
-            positions=scored.set_index("id")["position"].astype(int).to_dict(),
-        )
+        # make_transfers raises on a pairing FPL would reject. That guard exists
+        # to fail loudly at the point of the mistake - but letting it escape
+        # here skips STEP 6 entirely and costs the whole gameweek, which is
+        # strictly worse than the 400 it was written to pre-empt. Funnelled into
+        # the same recovery path as a failed submission: keep the squad, rebuild
+        # a legal lineup over it, and still submit that.
+        try:
+            ok = client.make_transfers(
+                transfers_in=plan.transfers_in,
+                transfers_out=plan.transfers_out,
+                prices_in=[int(scored.loc[scored["id"] == i, "cost"].iloc[0] * 10) for i in plan.transfers_in],
+                prices_out=[int(selling.get(i, 0) * 10) for i in plan.transfers_out],
+                wildcard=decision.chip == "wildcard",
+                free_hit=decision.chip == "freehit",
+                positions=scored.set_index("id")["position"].astype(int).to_dict(),
+            )
+        except ValueError as e:
+            logger.error("transfers rejected before submission: %s", e)
+            ok = None
         if ok is None:
             # The squad is still the old one, so the planned XI refers to
             # players we do not own and FPL would reject it - leaving last
@@ -342,11 +352,19 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
             # hold instead.
             logger.error("transfer submission failed; re-optimising the lineup over the current squad")
             owned = scored[scored["id"].isin(squad_ids)].copy()
+            # optimise_lineup, not build_squad. The squad here is fixed - these
+            # are the fifteen we hold - so the job is to order them, and
+            # optimise_lineup says exactly that: it asserts the frame IS the
+            # owned fifteen and needs no budget. build_squad instead re-solved a
+            # selection problem against a budget equal to the squad's own cost,
+            # which is feasible only by a hair and returned "problem is
+            # infeasible" the first time this path was exercised - turning a
+            # failed transfer into a lost gameweek.
             try:
                 plan = SquadOptimizer(
                     owned, value_col="xp_next", captain_col="xp_next",
                     ownership_weight=OWNERSHIP_WEIGHT,
-                ).build_squad(budget=float(owned["cost"].sum()) + 0.1)
+                ).optimise_lineup()
             except (RuntimeError, ValueError) as e:
                 logger.critical("could not rebuild a lineup from the owned squad: %s", e)
                 return None

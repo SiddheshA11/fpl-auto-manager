@@ -150,6 +150,15 @@ class XPModel:
         self.scoring = bootstrap["game_config"]["scoring"]
         # When each player can next feature, read from FPL's own news text.
         self.news = news.parse_all(bootstrap.get("elements") or [])
+        self._news_added: dict[int, date] = {}
+        for e in bootstrap.get("elements") or []:
+            raw = e.get("news_added")
+            if raw:
+                try:
+                    self._news_added[int(e["id"])] = datetime.fromisoformat(
+                        str(raw).replace("Z", "+00:00")).date()
+                except ValueError:
+                    pass
         self._minutes_cache: dict[int | None, pd.DataFrame] = {}
         self.teams = pd.DataFrame(bootstrap["teams"])
         self._team_id_to_code = self.teams.set_index("id")["code"].to_dict()
@@ -320,7 +329,16 @@ class XPModel:
         # quietly return a long-term injury to near-full fitness by gameweek
         # four, so only genuine doubts - anyone with something left to recover -
         # are allowed to improve with time.
-        doubtful = (base > 0.0) & (base < 1.0)
+        # Keyed on the news, not only on the base value. FPL routinely publishes
+        # a percentage alongside an open-ended injury ("Unknown return date",
+        # chance 25), and a base above zero was enough to let decay_doubt lift
+        # that player to 0.95 availability by gameweek five - restoring someone
+        # with no return date to nearly fit, which is the exact failure this
+        # guard was written to prevent.
+        indefinite = df["id"].astype(int).map(
+            lambda pid: bool(getattr(self.news.get(int(pid)), "indefinite", False))
+        )
+        doubtful = (base > 0.0) & (base < 1.0) & ~indefinite.to_numpy()
         if doubtful.any() and ahead > 0:
             out.loc[doubtful] = [news.decay_doubt(float(v), ahead) for v in base[doubtful]]
 
@@ -337,6 +355,19 @@ class XPModel:
                 )
         return out.clip(0.0, 1.0)
 
+    def _absence_days(self, pid: int, info) -> float | None:
+        """
+        How long the player has been out, from `news_added` to his return date.
+
+        Used only to decide whether the absence was long enough to cost match
+        fitness. Returns None when FPL published no timestamp, which leaves
+        ramp_multiplier on its default behaviour of damping.
+        """
+        added = self._news_added.get(pid)
+        if added is None or info.returns_on is None:
+            return None
+        return float((info.returns_on - added).days)
+
     def _ramp(self, event: int | None) -> pd.Series:
         """Start-probability damping for players easing back from an absence."""
         df = self.players
@@ -348,8 +379,15 @@ class XPModel:
         out = pd.Series(1.0, index=df.index)
         for pos, pid in enumerate(df["id"].astype(int)):
             info = self.news.get(int(pid))
-            if info is not None:
-                out.iloc[pos] = news.ramp_multiplier(info, when)
+            if info is None:
+                continue
+            # absence_days was never supplied, which made the short-absence
+            # carve-out in news.ramp_multiplier unreachable: a one-match
+            # suspension was damped to 0.55 exactly like a three-month injury.
+            # `news_added` is when FPL posted the flag, which is the best
+            # available proxy for when the absence began.
+            out.iloc[pos] = news.ramp_multiplier(
+                info, when, absence_days=self._absence_days(int(pid), info))
         return out
 
     def _normalise_starts_within_team(self, p_start: pd.Series) -> pd.Series:
