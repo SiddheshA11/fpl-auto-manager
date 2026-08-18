@@ -34,6 +34,55 @@ THRESHOLDS = {
     "wildcard": 20.0,
 }
 
+# How much higher the bar sits at the very start of a chip's window than at its
+# end. A chip is a one-shot resource with an expiry, so "is this worth 13
+# points" is the wrong question - the right one is "is this better than the
+# best chance I expect before the window closes". With eighteen gameweeks still
+# to come those chances are plentiful and the bar should be high; on the last
+# gameweek of the window it is play-it-or-lose-it and the base threshold is the
+# whole test.
+#
+# This came out of a real GW1 dry run proposing bench boost for 13.3 xP against
+# a flat 12.0 bar - in a gameweek where every player appears exactly once, with
+# every double gameweek of the half-season still ahead. A static threshold
+# cannot express that, and spending the chip there would have been a clear loss
+# against playing the same chip on a double.
+#
+# 0.6 is a judgement, not a measurement: it makes the opening bar 1.6x the
+# closing one, enough to hold a chip through an ordinary gameweek but not so
+# high that a genuinely exceptional early week is refused. Replacing it with a
+# real option value - the expected maximum over the remaining window, which
+# needs a distribution of weekly chip values - is the honest version and wants
+# a backtest behind it.
+EARLY_WINDOW_PREMIUM = 0.6
+
+
+def window_for(bootstrap: dict, name: str, event: int) -> dict | None:
+    """The window of chip `name` that covers `event`, if any."""
+    for w in chip_windows(bootstrap):
+        start, stop = w["start_event"], w["stop_event"]
+        if start is not None and stop is not None and start <= event <= stop:
+            if w["name"] == name:
+                return w
+    return None
+
+
+def effective_threshold(bootstrap: dict, name: str, event: int) -> float:
+    """
+    The bar chip `name` must clear to be worth playing in `event`.
+
+    Scales from EARLY_WINDOW_PREMIUM above the base threshold at the opening of
+    the window down to the base threshold on its final gameweek.
+    """
+    base = THRESHOLDS.get(name, 0.0)
+    w = window_for(bootstrap, name, event)
+    if not w:
+        return base
+    start, stop = int(w["start_event"]), int(w["stop_event"])
+    span = max(1, stop - start)
+    remaining = max(0, stop - event) / span      # 1.0 at the opening, 0.0 at the close
+    return base * (1.0 + EARLY_WINDOW_PREMIUM * remaining)
+
 
 @dataclass
 class ChipDecision:
@@ -223,14 +272,18 @@ class ChipEngine:
         if "wildcard" in avail and wildcard_gain is not None:
             candidates.append(ChipDecision("wildcard", wildcard_gain, f"rebuild gains {wildcard_gain:.1f} xP over the horizon"))
 
-        viable = [c for c in candidates if c.expected_gain >= THRESHOLDS.get(c.chip, 0.0)]
+        bars = {c.chip: effective_threshold(self.bootstrap, c.chip, event) for c in candidates}
+        viable = [c for c in candidates if c.expected_gain >= bars[c.chip]]
         if not viable:
-            best = max(candidates, key=lambda c: c.expected_gain, default=None)
-            detail = f"best was {best.chip} at {best.expected_gain:.1f} xP" if best else "nothing to evaluate"
+            best = max(candidates, key=lambda c: c.expected_gain - bars[c.chip], default=None)
+            detail = (
+                f"best was {best.chip} at {best.expected_gain:.1f} xP against a "
+                f"{bars[best.chip]:.1f} bar" if best else "nothing to evaluate"
+            )
             return ChipDecision(None, 0.0, f"no chip clears its threshold ({detail})")
 
         # Rank by how far each clears its own bar, so chips with different
         # thresholds are compared fairly rather than by raw points.
-        chosen = max(viable, key=lambda c: c.expected_gain - THRESHOLDS[c.chip])
+        chosen = max(viable, key=lambda c: c.expected_gain - bars[c.chip])
         logger.info("chip: playing %s (%s)", chosen.chip, chosen.reason)
         return chosen

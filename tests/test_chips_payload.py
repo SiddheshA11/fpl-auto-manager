@@ -106,3 +106,42 @@ def test_a_pending_chip_blocks_a_second_one(my_team, bootstrap):
     assert chips.pending_chips(pending) == {"bboost"}
     assert "bboost" not in chips.available_chips(bootstrap, pending, 1)
     assert "3xc" in chips.available_chips(bootstrap, pending, 1)
+
+
+def test_the_bar_falls_as_the_window_closes(bootstrap):
+    """
+    A chip is one-shot with an expiry, so the question is never "is this worth
+    13 points" but "is this better than the best chance left before it expires".
+    Early in a window there are many chances and the bar is high; on the final
+    gameweek it is play-it-or-lose-it and the base threshold is the whole test.
+    """
+    bars = [chips.effective_threshold(bootstrap, "bboost", ev) for ev in (1, 5, 10, 15, 19)]
+    assert bars == sorted(bars, reverse=True), "the bar must fall monotonically"
+    assert bars[-1] == pytest.approx(chips.THRESHOLDS["bboost"]), (
+        "on the last gameweek of the window the base threshold is the whole test"
+    )
+    assert bars[0] > bars[-1]
+
+
+def test_the_bar_resets_for_the_second_half_window(bootstrap):
+    """The game issues two of everything; the second gets its own full window."""
+    assert chips.effective_threshold(bootstrap, "bboost", 20) > \
+           chips.effective_threshold(bootstrap, "bboost", 19)
+    assert chips.effective_threshold(bootstrap, "bboost", 38) == pytest.approx(
+        chips.THRESHOLDS["bboost"])
+
+
+def test_a_merely_decent_bench_is_not_boosted_in_gameweek_one(bootstrap, my_team):
+    """
+    Regression, from a real dry run. The engine proposed bench boost in GW1 for
+    13.3 xP against a flat 12.0 bar - in a gameweek where every player appears
+    exactly once, with every double gameweek of the half-season still ahead.
+    """
+    assert 13.3 < chips.effective_threshold(bootstrap, "bboost", 1)
+    # ...and the same bench would still be boosted at the window's deadline.
+    assert 13.3 > chips.effective_threshold(bootstrap, "bboost", 19)
+
+
+def test_an_exceptional_bench_still_triggers_early(bootstrap):
+    """The premium holds an ordinary week, not a genuinely outstanding one."""
+    assert 25.0 > chips.effective_threshold(bootstrap, "bboost", 1)
