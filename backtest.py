@@ -181,6 +181,29 @@ def run_backtest(season: str, start_gw: int, end_gw: int, horizon: int = 1) -> p
             "ownable_ppg": _rank_corr(ownable["ppg"], ownable["total_points"]),
             "model_mae": float(np.mean(np.abs(merged["xp_next"] - merged["total_points"]))),
         }
+        # Absolute accuracy, on the population comparable published work uses.
+        #
+        # Rank correlation says whether the ordering is right; it cannot say
+        # whether the numbers are. Those numbers are what the optimiser
+        # actually consumes - a -4 hit is compared against them directly - so
+        # a model can rank well and still price every decision wrong.
+        #
+        # Published figures for next-gameweek FPL points, from Valouxis (NTUA,
+        # 2023) over 6,900 samples of 2022-23 GW26-38, several of them paid
+        # products: MAE 1.29-1.42, RMSE 2.27-2.38, R2 0.29-0.35. Population
+        # definitions differ, so treat these as a band to sit inside rather
+        # than a leaderboard to win.
+        for label, frame in (("all", merged), ("played", played), ("ownable", ownable)):
+            err = frame["xp_next"] - frame["total_points"]
+            ss_res = float((err ** 2).sum())
+            ss_tot = float(((frame["total_points"] - frame["total_points"].mean()) ** 2).sum())
+            record[f"{label}_mae"] = float(err.abs().mean())
+            record[f"{label}_rmse"] = float(np.sqrt((err ** 2).mean()))
+            record[f"{label}_r2"] = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else float("nan")
+            # Calibration: a model can rank well and still be wrong in level,
+            # and the level is what the optimiser prices decisions against.
+            record[f"{label}_pred"] = float(frame["xp_next"].mean())
+            record[f"{label}_actual"] = float(frame["total_points"].mean())
         for n in (20, 30, 50):
             record[f"model_top{n}"] = _top_n_actual(merged, "xp_next", n)
             record[f"ppg_top{n}"] = _top_n_actual(merged, "ppg", n)
@@ -231,6 +254,25 @@ def main() -> int:
         d = res[m].mean() - res[b].mean()
         print(f"{label:<38}{res[m].mean():>8.3f}{res[b].mean():>8.3f}{d:>+9.3f}")
     print(f"{'  (price-only baseline)':<38}{res['all_price'].mean():>8.3f}")
+
+    print(f"\nAbsolute accuracy on next-gameweek points")
+    print(f"{'  population':<38}{'MAE':>8}{'RMSE':>8}{'R2':>9}")
+    for label, name in (("all", "  all players"), ("played", "  players who appeared"),
+                        ("ownable", "  price >= £5.0m")):
+        print(f"{name:<38}{res[f'{label}_mae'].mean():>8.4f}"
+              f"{res[f'{label}_rmse'].mean():>8.4f}{res[f'{label}_r2'].mean():>9.4f}")
+    print("  published band (Valouxis 2023, n=6900)   1.29-1.42   2.27-2.38   0.29-0.35")
+    print("  note: population definitions differ; a band to sit inside, not a leaderboard")
+    print("  * selects on the outcome and is biased against the model by construction:")
+    print("    xp_next is unconditional, so it prices in the chance he does not play,")
+    print("    while the population is filtered to players who did. Diagnostic only.")
+
+    print(f"\nCalibration (level, not ordering)")
+    print(f"{'  population':<38}{'predicted':>10}{'actual':>9}{'bias':>9}")
+    for label, name in (("all", "  all players"), ("played", "  players who appeared"),
+                        ("ownable", "  price >= £5.0m")):
+        pr, ac = res[f"{label}_pred"].mean(), res[f"{label}_actual"].mean()
+        print(f"{name:<38}{pr:>10.3f}{ac:>9.3f}{pr - ac:>+9.3f}")
 
     print(f"\nMean actual points of top-N picks     {'model':>8}{'ppg':>8}{'delta':>9}")
     for n in (20, 30, 50):
