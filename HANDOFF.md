@@ -286,8 +286,28 @@ secrets and rotates correctly:
 ```bash
 gh workflow enable 231935805 --repo SiddheshA11/fpl-auto-manager
 gh workflow run 231935805 --repo SiddheshA11/fpl-auto-manager --ref rebuild/xp-model -f dry_run=true
+# Wait for it to FINISH before disabling. `gh workflow run` only queues the
+# dispatch and returns immediately, so chaining the disable onto it with && kills
+# the run before GitHub schedules a job for it: the run sticks in `queued` with
+# zero jobs, forever, and re-enabling afterwards does not revive it. That has
+# already silently swallowed one live submission.
+RID=$(gh run list --repo SiddheshA11/fpl-auto-manager --workflow 231935805 \
+      --limit 1 --json databaseId -q '.[0].databaseId')
+gh run watch "$RID" --repo SiddheshA11/fpl-auto-manager
 gh workflow disable 231935805 --repo SiddheshA11/fpl-auto-manager
 ```
+
+`--ref rebuild/xp-model` is not optional. The workflow file must exist on the
+default branch for GitHub to register `workflow_dispatch`, but the *code* that
+runs comes from the ref you dispatch - so omitting it runs `main`, which is
+still the old heuristic bot. The same trap spent a refresh token: dispatching
+against `main` ran a client that reads only `GITHUB_TOKEN`, so the rotated
+token was discarded and the stored secret left dead.
+
+**The scheduled cron always runs the default branch**, whatever you dispatch.
+Weekly Run's cron is `0 10 * * 5` - Friday 10:00 UTC - so leaving it enabled
+before the merge means `main`'s old bot overwrites the squad on Friday morning.
+Disable it again as soon as a manual run finishes.
 
 ## Design decisions worth not re-litigating
 
