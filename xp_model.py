@@ -25,11 +25,14 @@ import gzip
 import json
 import logging
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy.stats import poisson
+
+import news
 
 from priors import POSITION_NAMES, PriorSet
 
@@ -145,6 +148,9 @@ class XPModel:
         self.config = config or ModelConfig()
 
         self.scoring = bootstrap["game_config"]["scoring"]
+        # When each player can next feature, read from FPL's own news text.
+        self.news = news.parse_all(bootstrap.get("elements") or [])
+        self._minutes_cache: dict[int | None, pd.DataFrame] = {}
         self.teams = pd.DataFrame(bootstrap["teams"])
         self._team_id_to_code = self.teams.set_index("id")["code"].to_dict()
         self._team_id_to_name = self.teams.set_index("id")["short_name"].to_dict()
@@ -268,18 +274,81 @@ class XPModel:
 
     # ---------- minutes ----------
 
-    def _availability(self) -> pd.Series:
+    def _event_date(self, event: int) -> date | None:
+        """The deadline date of a gameweek - when availability is judged."""
+        for e in self.bootstrap.get("events", []):
+            if int(e["id"]) == int(event):
+                raw = e.get("deadline_time")
+                if not raw:
+                    return None
+                return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+        return None
+
+    def _availability(self, event: int | None = None) -> pd.Series:
         """
-        P(player is fit and selectable).
+        P(player is fit and selectable), for `event` specifically.
 
         chance_of_playing_next_round is authoritative when FPL publishes it;
         otherwise fall back to the status flag. A player flagged 'd' with no
         published percentage is a genuine doubt, not a certainty.
+
+        Both of those describe the *next* gameweek only, and the model plans
+        over five. Holding them flat across the horizon has two costs, and they
+        pull in opposite directions: a player out now but back in a fortnight
+        scores zero for gameweeks he will play, and a player carrying a knock is
+        priced as permanently 75% fit. Passing an event applies the news to that
+        gameweek's date and lets a short-term doubt decay.
         """
         df = self.players
         chance = df["chance_of_playing_next_round"] / 100.0
         fallback = df["status"].map(STATUS_AVAILABILITY).fillna(0.5)
-        return chance.where(chance.notna(), fallback).clip(0.0, 1.0)
+        base = chance.where(chance.notna(), fallback).clip(0.0, 1.0)
+        if event is None:
+            return base
+
+        when = self._event_date(event)
+        if when is None:
+            return base
+
+        events = next_events(self.bootstrap, self.config.horizon)
+        ahead = events.index(event) if event in events else 0
+
+        out = base.copy()
+        # A doubt fades; an absence does not. Decaying from a base of zero would
+        # quietly return a long-term injury to near-full fitness by gameweek
+        # four, so only genuine doubts - anyone with something left to recover -
+        # are allowed to improve with time.
+        doubtful = (base > 0.0) & (base < 1.0)
+        if doubtful.any() and ahead > 0:
+            out.loc[doubtful] = [news.decay_doubt(float(v), ahead) for v in base[doubtful]]
+
+        # The news is better evidence than the flag for anyone with a date
+        # attached, in both directions: still out for this gameweek, or back.
+        if self.news:
+            ids = df["id"].astype(int)
+            for pos, pid in enumerate(ids):
+                info = self.news.get(int(pid))
+                if info is None:
+                    continue
+                out.iloc[pos] = news.availability_on(
+                    info, when, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
+                )
+        return out.clip(0.0, 1.0)
+
+    def _ramp(self, event: int | None) -> pd.Series:
+        """Start-probability damping for players easing back from an absence."""
+        df = self.players
+        if event is None or not self.news:
+            return pd.Series(1.0, index=df.index)
+        when = self._event_date(event)
+        if when is None:
+            return pd.Series(1.0, index=df.index)
+        out = pd.Series(1.0, index=df.index)
+        for pos, pid in enumerate(df["id"].astype(int)):
+            info = self.news.get(int(pid))
+            if info is not None:
+                out.iloc[pos] = news.ramp_multiplier(info, when)
+        return out
 
     def _normalise_starts_within_team(self, p_start: pd.Series) -> pd.Series:
         """
@@ -325,11 +394,20 @@ class XPModel:
 
         return out.clip(0.0, 1.0)
 
-    def minutes_model(self) -> pd.DataFrame:
-        """P(appear), P(60+ minutes) and expected minutes for each player."""
+    def minutes_model(self, event: int | None = None) -> pd.DataFrame:
+        """
+        P(appear), P(60+ minutes) and expected minutes for each player.
+
+        Cached per gameweek: this is called once per fixture and the
+        within-team start normalisation is the expensive part of the model.
+        """
+        cached = self._minutes_cache.get(event)
+        if cached is not None:
+            return cached
+
         df = self.players
-        avail = self._availability()
-        start_rate = df["start_rate"].clip(0.0, 1.0).fillna(0.0)
+        avail = self._availability(event)
+        start_rate = (df["start_rate"].clip(0.0, 1.0).fillna(0.0) * self._ramp(event))
 
         # Non-starters who still appear: a fixed share of the remaining
         # probability mass. Bench cameos are frequent but low-minute.
@@ -342,13 +420,15 @@ class XPModel:
         p60 = (p_start * P60_GIVEN_START).clip(0.0, 1.0)
         exp_minutes = p_start * STARTER_MINUTES + p_sub * SUB_MINUTES
 
-        return pd.DataFrame({
+        frame = pd.DataFrame({
             "availability": avail,
             "p_start": p_start,
             "p_appear": p_appear,
             "p60": p60,
             "exp_minutes": exp_minutes,
         }, index=df.index)
+        self._minutes_cache[event] = frame
+        return frame
 
     # ---------- fixtures ----------
 
@@ -497,10 +577,11 @@ class XPModel:
 
     # ---------- the estimate ----------
 
-    def expected_points_for_fixture(self, team_id: int, opponent_id: int, is_home: bool) -> pd.Series:
+    def expected_points_for_fixture(self, team_id: int, opponent_id: int, is_home: bool,
+                                    event: int | None = None) -> pd.Series:
         """xP for every player, were their team to play this single fixture."""
         df = self.players
-        mm = self.minutes_model()
+        mm = self.minutes_model(event)
         pos = df["position"]
 
         gf, ga = self._goal_expectations(team_id, opponent_id, is_home)
@@ -594,7 +675,8 @@ class XPModel:
                 mask = df["team"] == f["team_id"]
                 if not mask.any():
                     continue
-                xp = self.expected_points_for_fixture(int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]))
+                xp = self.expected_points_for_fixture(
+                    int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]), event=ev)
                 gw_points[mask] += xp[mask]
                 fixture_count[mask] += 1
 
