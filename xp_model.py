@@ -34,7 +34,7 @@ from scipy.stats import poisson
 
 import news
 
-from priors import POSITION_NAMES, PriorSet
+from priors import PENALTY_XG90, POSITION_NAMES, PriorSet
 
 logger = logging.getLogger("fpl_auto.xp")
 
@@ -167,6 +167,7 @@ class XPModel:
             "minutes", "starts", "expected_goals", "expected_assists", "saves", "bps",
             "yellow_cards", "goals_conceded", "defensive_contribution", "now_cost",
             "selected_by_percent", "chance_of_playing_next_round", "total_points",
+            "penalties_order",
         ]
         for col in numeric:
             if col in df.columns:
@@ -229,6 +230,7 @@ class XPModel:
             df[col] = w_cur * cur_vals + (1.0 - w_cur) * prior_vals
 
         df["dc90"] = self._adjust_dc_for_club_move(df, w_cur)
+        df["xg90"] = self._adjust_xg_for_penalty_duty(df, w_cur)
 
         # Start rate. Two things differ from the rate columns above.
         #
@@ -520,6 +522,44 @@ class XPModel:
         if n_moved:
             logger.info("defensive contribution rescaled for %d players who changed club", n_moved)
         return adjusted
+
+    def _adjust_xg_for_penalty_duty(self, df: pd.DataFrame, w_cur: pd.Series) -> pd.Series:
+        """
+        Correct expected goals when a player has gained or lost the penalties.
+
+        A taker's own xG history already contains his penalties - Opta's model
+        counts them at about 0.79 each - so a player who keeps the job needs no
+        adjustment. The correction is for the turnover, which is heavy: of 16
+        takers in 2024-25 only 7 still held it a season later. A prior earned
+        with the duty overstates a player who has since lost it, and one earned
+        without it understates a player who has just been given it.
+
+        Only the prior share is corrected, on the same reasoning as the club-move
+        adjustment: minutes played this season already reflect the current duty.
+        """
+        xg90 = pd.to_numeric(df["xg90"], errors="coerce")
+        duty = self.priors.player_penalty_duty
+        if not duty or "penalties_order" not in df.columns:
+            return xg90
+
+        order = pd.to_numeric(df["penalties_order"], errors="coerce")
+        now_taker = order == 1
+        mapped = df["code"].map(duty)
+        known = mapped.notna()
+        # Built as a plain bool array rather than fillna(...).astype(bool) on an
+        # object column, which pandas deprecates and which would start emitting
+        # a downcasting warning - the kind of drift that already cost us once.
+        was_taker = pd.Series(mapped.to_numpy() == True, index=df.index)  # noqa: E712
+
+        prior_share = 1.0 - pd.to_numeric(w_cur, errors="coerce").fillna(0.0)
+        delta = pd.Series(0.0, index=df.index)
+        delta[known & now_taker & ~was_taker] = PENALTY_XG90
+        delta[known & ~now_taker & was_taker] = -PENALTY_XG90
+
+        moved = int((delta != 0).sum())
+        if moved:
+            logger.info("expected goals adjusted for %d players whose penalty duty changed", moved)
+        return (xg90 + delta * prior_share).clip(lower=0.0)
 
     def _expected_bonus(self, bps90: pd.Series, minutes_share: pd.Series) -> pd.Series:
         """Interpolate the empirical BPS-to-bonus curve, scaled by minutes."""

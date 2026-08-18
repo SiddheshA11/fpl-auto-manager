@@ -108,6 +108,8 @@ class PriorSet:
     # rate was earned at, so a summer transfer can be corrected for style.
     team_dc_factor: dict[int, float] = field(default_factory=dict)
     player_dc_team: pd.Series | None = None
+    # Whether each player held his club's penalties when the prior was earned.
+    player_penalty_duty: dict[int, bool] = field(default_factory=dict)
 
     def team_by_code(self, code: int) -> TeamStrength | None:
         return self.teams.get(code)
@@ -575,6 +577,57 @@ def build_player_dc_team(seasons: list[str] | None = None) -> pd.Series:
     return best.set_index("code")["team_code"].astype(int)
 
 
+# ──────────────── penalty duty ────────────────
+
+# Expected goals added by holding a club's penalties, per 90 minutes.
+#
+# Measured from the two seasons on disk rather than assumed. FPL records
+# penalties_missed but not penalties scored, so the count is recovered from
+# misses at the league conversion rate: 14 and 15 misses across 380 matches
+# imply roughly 0.08 penalties per team per match under any conversion between
+# 0.75 and 0.80. At 0.79 xG per penalty that is ~0.067 xG per 90 - about a
+# third of a point a game for a midfielder.
+#
+# This is a correction for *changes* in duty only. A player who keeps the job
+# needs nothing: his own expected-goals history already contains his penalties,
+# because Opta's xG counts them. The correction exists because duty turns over
+# hard - of 16 takers in 2024-25 only 7 still held it in 2025-26, 9 lost it and
+# 5 were new - so a prior is routinely earned under a duty the player no longer
+# has, or lacks one he now holds.
+#
+# Not validated against outcomes: the four players who gained duty and six who
+# lost it are far too few to measure a 0.067 effect against season-to-season
+# form variation, and the naive estimate from them has the wrong sign. This is
+# derived, not fitted, and is deliberately the smaller of the plausible values.
+PENALTY_XG90 = 0.067
+
+
+def build_player_penalty_duty(seasons: list[str] | None = None) -> dict[int, bool]:
+    """
+    Whether each player held his club's penalties in the priors, by `code`.
+
+    Read from the most recent season a player appears in, since that is the
+    duty his blended rate mostly reflects.
+    """
+    seasons = seasons or available_seasons()
+    out: dict[int, bool] = {}
+    for season in sorted(seasons):        # oldest first, so recent seasons win
+        try:
+            raw = pd.read_csv(_season_dir(season) / "players_raw.csv")
+        except (FileNotFoundError, pd.errors.EmptyDataError):
+            continue
+        if "penalties_order" not in raw.columns or "code" not in raw.columns:
+            continue
+        # Only players with real minutes: an order recorded for someone who
+        # never played says nothing about the rate his prior was built from.
+        played = raw[raw.get("minutes", 0) >= 450] if "minutes" in raw.columns else raw
+        for code, order in zip(played["code"], played["penalties_order"]):
+            out[int(code)] = bool(pd.notna(order) and int(order) == 1)
+    logger.info("penalty duty: %d players, %d were takers",
+                len(out), sum(1 for v in out.values() if v))
+    return out
+
+
 # ──────────────────────── team strength ────────────────────────
 
 
@@ -687,4 +740,5 @@ def build_priors(seasons: list[str] | None = None, current_team_codes: dict[int,
         positional=positional,
         team_dc_factor=build_team_dc_factors(seasons),
         player_dc_team=build_player_dc_team(seasons),
+        player_penalty_duty=build_player_penalty_duty(seasons),
     )

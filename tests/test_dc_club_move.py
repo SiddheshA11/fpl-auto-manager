@@ -146,12 +146,14 @@ def test_stale_preseason_totals_are_ignored():
                                    for e in bootstrap["events"]]}
     frame = X.XPModel(pre, fixtures, ps, X.ModelConfig(horizon=1))._build_player_frame()
 
-    joined = frame.join(ps.players[["xg90"]], on="code", rsuffix="_prior")
-    both = joined.dropna(subset=["xg90_prior"])
+    # Compare on a rate nothing corrects. dc90 is rescaled for club movers and
+    # xg90 for penalty-duty changes, so both would fail this for the right
+    # reasons; xa90 passes through the blend untouched.
+    joined = frame.join(ps.players[["xa90"]], on="code", rsuffix="_prior")
+    both = joined.dropna(subset=["xa90_prior"])
     both = both[both["minutes"] > 500]
     assert len(both) > 50, "not enough overlap to make the comparison meaningful"
-    # dc90 is rescaled for movers, so xg90 is the clean column to compare on.
-    assert np.allclose(both["xg90"], both["xg90_prior"], atol=1e-9), (
+    assert np.allclose(both["xa90"], both["xa90_prior"], atol=1e-9), (
         "pre-season rates must come from the priors alone"
     )
 
