@@ -72,6 +72,29 @@ DC_DISPERSION = 1.0
 BONUS_CURVE_BPS = [3.8, 7.06, 9.65, 12.66, 15.41, 18.34, 21.11, 24.51, 27.88]
 BONUS_CURVE_PTS = [0.0286, 0.0497, 0.0999, 0.1582, 0.2839, 0.4288, 0.6485, 0.799, 1.1664]
 
+# Per-position correction to that curve.
+#
+# Bonus is a *rank-within-match* award, so its expectation depends on the
+# dispersion of a player's match BPS, not only on its mean. A forward's BPS is
+# goal-spiked and lands on the podium or nowhere; a midfielder's accumulates
+# steadily just below it. At matched bps90 a forward earns roughly 1.65x a
+# midfielder's bonus - a single mean-to-mean curve cannot represent that and
+# sits between the two, accurate for neither.
+#
+# Measured as the ratio of actual bonus/90 to what the curve above predicts,
+# over 660 player-seasons at 900+ minutes. Fitting on 2024-25 and testing on
+# 2025-26 reproduces every multiplier within 0.11, so this is a stable property
+# of the scoring system rather than a one-season artefact:
+#
+#   fitted 24-25 -> observed 25-26:  GK 1.02 -> 0.91, DEF 0.94 -> 0.83,
+#                                    MID 0.68 -> 0.70, FWD 1.38 -> 1.24
+#
+# An NTUA thesis on ML for FPL (Valouxis, 2023) reaches the same conclusion
+# from the other direction, including `position` as an explicit feature in its
+# bonus model because "each position class is rewarded bonus points a little
+# bit differently".
+BONUS_POSITION_MULTIPLIER = {1: 0.96, 2: 0.87, 3: 0.69, 4: 1.31}
+
 # Minutes model constants.
 # Sharpness of the within-team competition for a starting shirt. Goalkeeper is
 # effectively winner-take-all, so probability concentrates hard on the first
@@ -82,6 +105,18 @@ OUTFIELD_COMPETITION_ALPHA = 1.5
 STARTER_MINUTES = 82.0      # mean minutes for a player who starts
 SUB_MINUTES = 18.0          # mean minutes for a player who comes off the bench
 P60_GIVEN_START = 0.92      # a starter reaching the 60-minute appearance bonus
+
+# P(appears | did not start), as a function of how likely he was to start.
+# Measured over 57,362 player-gameweeks across 2024-25 and 2025-26; the
+# marginal rate across all of them is 0.156, not the 0.35 this replaced.
+SUB_RATE_BY_START = (
+    [0.00, 0.05, 0.15, 0.30, 0.50, 0.70, 0.90, 1.00],
+    [0.03, 0.034, 0.231, 0.330, 0.361, 0.436, 0.398, 0.35],
+)
+# Keepers essentially never appear off the bench: measured 0.0036 over 4,776
+# non-start goalkeeper gameweeks. A substitute keeper means an injury or a red
+# card to the first choice.
+GK_SUB_RATE = 0.0036
 
 # How much current-season evidence is needed before it outweighs the prior.
 # Lower than the priors' own figure because in-season form is more relevant to
@@ -453,13 +488,35 @@ class XPModel:
         avail = self._availability(event)
         start_rate = (df["start_rate"].clip(0.0, 1.0).fillna(0.0) * self._ramp(event))
 
-        # Non-starters who still appear: a fixed share of the remaining
-        # probability mass. Bench cameos are frequent but low-minute.
-        sub_rate = 0.35
-
         p_start = avail * start_rate
         p_start = self._normalise_starts_within_team(p_start)
-        p_sub = avail * (1.0 - start_rate) * sub_rate
+
+        # Substitute appearances, conditional on the player's actual standing in
+        # the side rather than a flat share.
+        #
+        # This was `0.35` for everyone. Measured over 57,000 player-gameweeks the
+        # marginal rate is 0.156, and it is strongly monotone in how often the
+        # player starts: 0.034 for someone who almost never starts, rising to
+        # ~0.43 for a regular who happens to be benched. The flat figure was
+        # therefore ~10x too high for exactly the population it was applied to
+        # most - two thirds of all non-start rows are players in the bottom
+        # band - which is the mechanism behind the model's known weakness at
+        # ranking players who never appear.
+        #
+        # Goalkeepers are the extreme: measured P(appear | did not start) is
+        # 0.0036. At 0.35 the model credited a keeper it had just assigned a
+        # 0.000 start probability with six expected minutes and 0.45 xP, and
+        # that fabricated value was the entire basis for ranking the bench
+        # keeper slot.
+        #
+        # Keyed on post-normalisation p_start, not the raw rate: the normaliser
+        # has already decided who is behind whom in the pecking order, and the
+        # old code threw that verdict away by using the pre-normalisation value.
+        sub_rate = pd.Series(
+            np.interp(p_start, SUB_RATE_BY_START[0], SUB_RATE_BY_START[1]),
+            index=df.index,
+        ).where(df["position"] != 1, GK_SUB_RATE)
+        p_sub = avail * (1.0 - p_start) * sub_rate
         p_appear = (p_start + p_sub).clip(0.0, 1.0)
         p60 = (p_start * P60_GIVEN_START).clip(0.0, 1.0)
         exp_minutes = p_start * STARTER_MINUTES + p_sub * SUB_MINUTES
@@ -612,10 +669,18 @@ class XPModel:
         return (xg90 + delta * prior_share).clip(lower=0.0)
 
     def _expected_bonus(self, bps90: pd.Series, minutes_share: pd.Series) -> pd.Series:
-        """Interpolate the empirical BPS-to-bonus curve, scaled by minutes."""
+        """
+        Interpolate the empirical BPS-to-bonus curve, scaled by minutes and
+        corrected per position.
+
+        See BONUS_POSITION_MULTIPLIER: the curve maps a mean to a mean, while
+        bonus is a rank award whose expectation depends on BPS dispersion, and
+        that dispersion differs sharply by position.
+        """
         b = np.interp(bps90.fillna(0.0), BONUS_CURVE_BPS, BONUS_CURVE_PTS,
                       left=BONUS_CURVE_PTS[0], right=BONUS_CURVE_PTS[-1])
-        return pd.Series(b, index=bps90.index) * minutes_share
+        out = pd.Series(b, index=bps90.index) * minutes_share
+        return out * self.players["position"].map(BONUS_POSITION_MULTIPLIER).fillna(1.0)
 
     def _tail_probability(self, mu: np.ndarray, threshold: int) -> np.ndarray:
         """P(X >= threshold) for a count with mean mu."""

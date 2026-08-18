@@ -73,6 +73,31 @@ PROMOTED_DEFENCE = 1.28
 
 # Home advantage as a multiplier on expected goals. ~1.12/0.89 is the standard
 # split and is stable season to season.
+# How much of a team's measured deviation from the league mean carries into the
+# season being predicted.
+#
+# Team strength was applied raw, at 100%. Regressing each team's multiplier on
+# its own previous-season value, over the 17 clubs present in both 2024-25 and
+# 2025-26, gives slopes of 0.50 for attack (r 0.45) and 0.66 for defence
+# (r 0.70). Attacking output regresses hard; defensive output is stickier but
+# still well short of persistent.
+#
+# The cost of ignoring this falls almost entirely on defenders, because clean
+# sheet is the largest term in their expected points and it is exponential in
+# goals conceded. A multiplier of 0.55 taken raw implies a 50.4% home clean
+# sheet; shrunk it is 41.6% - a nine point overstatement on exactly the players
+# the optimiser is most inclined to buy.
+#
+# This also makes the promoted-club priors consistent: PROMOTED_ATTACK and
+# PROMOTED_DEFENCE below are already shrunk by construction, so leaving
+# everyone else raw put the two on different scales.
+#
+# Estimated from 17 clubs, so treat as the right order of magnitude rather than
+# a precise figure. Both are safely inside [0, 1], where 1.0 is the old
+# behaviour and 0.0 would flatten every team to average.
+ATTACK_RETAINED = 0.50
+DEFENCE_RETAINED = 0.66
+
 HOME_ATTACK_BOOST = 1.12
 AWAY_ATTACK_BOOST = 0.89
 
@@ -700,11 +725,13 @@ def build_team_strength(
     for code, m in matches.items():
         if m < 5:  # too little evidence to trust
             continue
+        raw_attack = (goals_for[code] / m) / league_mean if league_mean > 0 else 1.0
+        raw_defence = (goals_against[code] / m) / league_mean if league_mean > 0 else 1.0
         strengths[code] = TeamStrength(
             code=code,
             name=names.get(code, str(code)),
-            attack=(goals_for[code] / m) / league_mean if league_mean > 0 else 1.0,
-            defence=(goals_against[code] / m) / league_mean if league_mean > 0 else 1.0,
+            attack=1.0 + ATTACK_RETAINED * (raw_attack - 1.0),
+            defence=1.0 + DEFENCE_RETAINED * (raw_defence - 1.0),
             matches=int(m),
         )
 
