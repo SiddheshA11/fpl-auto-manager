@@ -20,7 +20,7 @@ import logging
 import shutil
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -36,7 +36,39 @@ LIVE_ENDPOINTS = {"bootstrap-static": f"{FPL_API}/bootstrap-static/", "fixtures"
 
 VAASTAV_RAW = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data"
 SEASON_FILES = ["players_raw.csv", "teams.csv", "fixtures.csv", "gws/merged_gw.csv"]
-DEFAULT_SEASONS = ["2024-25", "2025-26"]
+# Seasons are derived from the date, never hardcoded.
+#
+# They used to be a literal ["2024-25", "2025-26"]. In a project designed to
+# run unattended for years that is a dated bomb: come August 2027 nothing
+# fetches 2026-27, priors are built from data two and three years old,
+# PriorSet.validate() passes because it only counts rows, and the bot quietly
+# submits an opening squad priced off a season before last - with every summer
+# signing invisible to it. Nothing fails; it just gets worse.
+HISTORY_SEASONS = 3
+
+
+def season_label(start_year: int) -> str:
+    """FPL's own naming: the 2026-27 season starts in 2026."""
+    return f"{start_year}-{(start_year + 1) % 100:02d}"
+
+
+def current_season_start_year(today: date | None = None) -> int:
+    """
+    The year the season now in progress began.
+
+    A season runs August to May, so anything from July onward belongs to the
+    season starting this year, and anything earlier to the one starting last.
+    July rather than August because pre-season data appears before a ball is
+    kicked.
+    """
+    today = today or date.today()
+    return today.year if today.month >= 7 else today.year - 1
+
+
+def default_seasons(today: date | None = None) -> list[str]:
+    """The current season and the two before it, oldest first."""
+    start = current_season_start_year(today)
+    return [season_label(y) for y in range(start - HISTORY_SEASONS + 1, start + 1)]
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 TIMEOUT = 60
@@ -91,9 +123,15 @@ def fetch_history(seasons: list[str]) -> list[Path]:
         season_dir = HISTORY_DIR / season
         season_dir.mkdir(parents=True, exist_ok=True)
 
+        # A finished season never changes, so it is fetched once. The season in
+        # progress changes every week, and skipping it froze team strength at
+        # last season's values for the whole campaign - by May the model was
+        # still pricing every side on data a year old.
+        in_progress = season == season_label(current_season_start_year())
+
         for rel in SEASON_FILES:
             dest = season_dir / Path(rel).name
-            if dest.exists():
+            if dest.exists() and not in_progress:
                 logger.info("have %s/%s, skipping", season, dest.name)
                 written.append(dest)
                 continue
@@ -121,7 +159,7 @@ def prune_snapshots(keep: int = 8) -> None:
 def main() -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--seasons", default=",".join(DEFAULT_SEASONS))
+    ap.add_argument("--seasons", default=",".join(default_seasons()))
     ap.add_argument("--skip-live", action="store_true")
     ap.add_argument("--skip-history", action="store_true")
     args = ap.parse_args()

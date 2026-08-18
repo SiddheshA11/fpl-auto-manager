@@ -34,6 +34,10 @@ logger = logging.getLogger("fpl_auto.priors")
 
 HISTORY_DIR = Path(__file__).parent / "data" / "history"
 
+# Gameweeks in a full Premier League season, used to tell a finished
+# season from one still being played.
+FULL_SEASON_GAMEWEEKS = 38
+
 POSITION_NAMES = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 POSITION_IDS = {v: k for k, v in POSITION_NAMES.items()}
 
@@ -176,6 +180,28 @@ def available_seasons() -> list[str]:
     if not HISTORY_DIR.exists():
         return []
     return sorted(d.name for d in HISTORY_DIR.iterdir() if d.is_dir() and (d / "merged_gw.csv").exists())
+
+
+def season_is_complete(season: str) -> bool:
+    """
+    Whether a season has finished, judged from its own data rather than a date.
+
+    A season in progress is legitimate input for *team* strength - it is the
+    freshest evidence there is about how a side is playing - but must be kept
+    out of *player* priors, because xp_model already blends current-season
+    per-90 rates through `w_cur`. Letting it in through both doors weights this
+    season roughly twice and undoes the shrinkage the priors exist to apply.
+    """
+    try:
+        gw = pd.read_csv(_season_dir(season) / "merged_gw.csv", usecols=["GW"])
+    except (FileNotFoundError, pd.errors.EmptyDataError, ValueError):
+        return False
+    return int(gw["GW"].max() or 0) >= FULL_SEASON_GAMEWEEKS
+
+
+def completed_seasons(seasons: list[str] | None = None) -> list[str]:
+    """Seasons on disk that have actually finished."""
+    return [s for s in (seasons or available_seasons()) if season_is_complete(s)]
 
 
 def load_season(season: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] | None:
@@ -374,9 +400,9 @@ def build_player_priors(seasons: list[str] | None = None) -> tuple[pd.DataFrame,
 
     Returns (player_priors, positional_means).
     """
-    seasons = seasons or available_seasons()
+    seasons = completed_seasons(seasons)
     if not seasons:
-        logger.warning("no history seasons on disk; priors will be empty")
+        logger.warning("no completed history seasons on disk; priors will be empty")
         return pd.DataFrame(), pd.DataFrame()
 
     # Most recent first, so decay index 0 is the freshest season.
@@ -670,7 +696,27 @@ def build_team_strength(
     mid-table side's.
     """
     seasons = seasons or available_seasons()
-    ordered = sorted(seasons, reverse=True)
+
+    # The season in progress is the freshest evidence there is about how a side
+    # is playing now, and team strength was frozen without it: fetch_data
+    # skipped files it already had, so by May the model still priced every club
+    # on data a year old. Promoted sides are the sharp end - a fixed prior of
+    # 0.78/1.28 against clubs that actually landed anywhere from 0.73/1.44 to
+    # 0.94/1.07 - and the cheap defenders the optimiser shops in are exactly
+    # who that misprices.
+    #
+    # It is given the same recency weight as the most recent completed season
+    # rather than displacing it. Weighting is by accumulated match count, so a
+    # three-match season contributes three matches of evidence against a full
+    # season's thirty-eight and earns its influence gradually. Slotting it in
+    # ahead would instead decay last season from 1.0 to 0.45 on the strength of
+    # three matches, which is worse than not updating at all.
+    in_progress = [s for s in seasons if not season_is_complete(s)]
+    ordered = sorted(completed_seasons(seasons), reverse=True)
+    weights = {s: SEASON_DECAY**i for i, s in enumerate(ordered)}
+    for s in in_progress:
+        weights[s] = 1.0
+    ordered = in_progress + ordered
 
     goals_for: dict[int, float] = {}
     goals_against: dict[int, float] = {}
@@ -692,7 +738,7 @@ def build_team_strength(
 
         id_to_code = teams.set_index("id")["code"].to_dict()
         id_to_name = teams.set_index("id")["name"].to_dict()
-        weight = SEASON_DECAY**i
+        weight = weights.get(season, SEASON_DECAY**i)
 
         played = fixtures.dropna(subset=["team_h_score", "team_a_score"])
         for _, fx in played.iterrows():

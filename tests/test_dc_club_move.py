@@ -228,3 +228,55 @@ def test_aggregation_keeps_positions_under_either_dtype():
             f"positions were lost during aggregation under the {dtype} dtype"
         )
         assert set(agg["element_type"]) == {3, 2}
+
+
+# ── season handling: rollover and the season in progress ───────────────────
+
+@pytest.mark.parametrize("today,expected_last", [
+    ("2026-08-18", "2026-27"),
+    ("2027-02-01", "2026-27"),   # January still belongs to the season that began in August
+    ("2027-08-01", "2027-28"),
+    ("2030-12-25", "2030-31"),
+])
+def test_seasons_are_derived_from_the_date_not_hardcoded(today, expected_last):
+    """
+    The season list was a literal ["2024-25", "2025-26"]. In a bot designed to
+    run unattended for years that is a dated bomb: in August 2027 nothing would
+    fetch 2026-27, priors would be built from data two and three years old,
+    validate() would pass because it only counts rows, and the opening squad
+    would be priced off the season before last with every summer signing
+    invisible. Nothing fails - it just quietly gets worse.
+    """
+    import datetime
+
+    import fetch_data
+
+    seasons = fetch_data.default_seasons(datetime.date.fromisoformat(today))
+    assert seasons[-1] == expected_last
+    assert len(seasons) == fetch_data.HISTORY_SEASONS
+    assert seasons == sorted(seasons), "oldest first"
+
+
+def test_an_unfinished_season_is_kept_out_of_player_priors():
+    """
+    The season in progress is the freshest evidence about a *team*, but must
+    not reach *player* priors: xp_model already blends current-season per-90
+    rates through w_cur, so admitting it here counts this season roughly twice
+    and undoes the shrinkage the priors exist to apply.
+    """
+    seasons = priors.available_seasons()
+    if not seasons:
+        pytest.skip("no history on disk")
+
+    real = priors.season_is_complete
+    try:
+        priors.season_is_complete = lambda s: s != seasons[-1]
+        assert seasons[-1] not in priors.completed_seasons(seasons)
+        players, _ = priors.build_player_priors(seasons)
+        # It is still allowed into team strength, at the same recency weight as
+        # the most recent completed season rather than displacing it.
+        strengths, _ = priors.build_team_strength(seasons)
+        assert len(strengths) > 10, "team strength must still use the live season"
+    finally:
+        priors.season_is_complete = real
+    assert not players.empty, "excluding the live season must not empty the priors"
