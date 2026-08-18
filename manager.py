@@ -143,6 +143,55 @@ def _reoptimise_lineup(plan, scored: pd.DataFrame):
     return plan
 
 
+def _pair_by_position(transfers_in: list[int], transfers_out: list[int],
+                      scored: pd.DataFrame) -> tuple[list[int], list[int]]:
+    """
+    Order the two lists so that each pair is a like-for-like swap.
+
+    FPL validates every transfer pair individually:
+
+        {"non_field_errors": [{"message": "Element in and element out must be
+          of the same type", "code": "transfer_element_type_mismatch"}]}
+
+    and rejects the whole POST if any pair fails. Both lists were previously
+    sorted by element id and zipped, which pairs players in an order that has
+    nothing to do with position - a real 12-transfer submission had 8 of its 12
+    pairs rejected. A single transfer happens to work whenever the squad shape
+    is unchanged, which is why this survived every earlier test.
+
+    The position multisets on both sides always match, because squad
+    composition is fixed at 2/5/5/3, so a valid pairing always exists.
+    """
+    position = scored.set_index("id")["position"].to_dict()
+
+    by_position_in: dict[int, list[int]] = {}
+    by_position_out: dict[int, list[int]] = {}
+    for pid in transfers_in:
+        by_position_in.setdefault(int(position.get(pid, -1)), []).append(pid)
+    for pid in transfers_out:
+        by_position_out.setdefault(int(position.get(pid, -1)), []).append(pid)
+
+    if sorted(by_position_in) != sorted(by_position_out) or any(
+        len(by_position_in[k]) != len(by_position_out.get(k, [])) for k in by_position_in
+    ):
+        # Cannot happen for a squad the optimiser built, since it constrains
+        # positions exactly. Surfaced rather than swallowed: submitting an
+        # unpairable set guarantees a 400 at the deadline.
+        logger.error(
+            "transfer positions do not match: in=%s out=%s; submitting unpaired",
+            {k: len(v) for k, v in by_position_in.items()},
+            {k: len(v) for k, v in by_position_out.items()},
+        )
+        return transfers_in, transfers_out
+
+    paired_in: list[int] = []
+    paired_out: list[int] = []
+    for pos in sorted(by_position_in):
+        paired_in.extend(by_position_in[pos])
+        paired_out.extend(by_position_out[pos])
+    return paired_in, paired_out
+
+
 def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
@@ -266,6 +315,8 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
 
     names = scored.set_index("id")["web_name"].to_dict()
     if plan.transfers_in:
+        plan.transfers_in, plan.transfers_out = _pair_by_position(
+            plan.transfers_in, plan.transfers_out, scored)
         for tin, tout in zip(plan.transfers_in, plan.transfers_out):
             logger.info("  OUT %s -> IN %s", names.get(tout, tout), names.get(tin, tin))
         if plan.hits:
@@ -281,6 +332,7 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
             prices_out=[int(selling.get(i, 0) * 10) for i in plan.transfers_out],
             wildcard=decision.chip == "wildcard",
             free_hit=decision.chip == "freehit",
+            positions=scored.set_index("id")["position"].astype(int).to_dict(),
         )
         if ok is None:
             # The squad is still the old one, so the planned XI refers to

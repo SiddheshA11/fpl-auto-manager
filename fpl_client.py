@@ -507,7 +507,8 @@ class FPLClient:
 
     def make_transfers(self, transfers_in: list[int], transfers_out: list[int],
                        prices_in: list[int], prices_out: list[int],
-                       wildcard: bool = False, free_hit: bool = False) -> dict | None:
+                       wildcard: bool = False, free_hit: bool = False,
+                       positions: dict[int, int] | None = None) -> dict | None:
         """
         Execute transfers.
 
@@ -520,6 +521,22 @@ class FPLClient:
         """
         if len(transfers_in) != len(transfers_out) or len(transfers_in) != len(prices_in) or len(transfers_out) != len(prices_out):
             raise ValueError("All transfer lists must be the same length.")
+
+        # FPL validates each pair individually and rejects the entire POST if
+        # any one of them swaps positions. Checking here turns a deadline-time
+        # 400 into a loud failure at the point the mistake was made. `positions`
+        # is optional only so existing callers keep working; supply it.
+        if positions:
+            bad = [
+                (i, o) for i, o in zip(transfers_in, transfers_out)
+                if positions.get(i) is not None and positions.get(o) is not None
+                and positions[i] != positions[o]
+            ]
+            if bad:
+                raise ValueError(
+                    f"{len(bad)} transfer pair(s) swap position, which FPL rejects "
+                    f"with transfer_element_type_mismatch: {bad}"
+                )
 
         next_event = self.get_next_event()
         if not next_event:
