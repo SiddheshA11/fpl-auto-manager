@@ -25,7 +25,7 @@ SQUAD_NAMES = ["Sels", "Tarkowski", "Thiaw", "Collins", "B.Fernandes", "Mbeumo",
                "Sánchez", "Virgil", "Milenković", "Woltemade"]
 
 
-def _state(fixtures=None):
+def _state(fixtures=None, scoring=None):
     bs_files = sorted(SNAPS.glob("bootstrap-static_*.json.gz"), reverse=True)
     if not bs_files:
         pytest.skip("no snapshot committed")
@@ -34,7 +34,7 @@ def _state(fixtures=None):
         sorted(SNAPS.glob("fixtures_*.json.gz"), reverse=True)[0])
     ps = priors.build_priors(current_team_codes={t["code"]: t["name"] for t in bootstrap["teams"]})
     model = X.XPModel(bootstrap, fx, ps, X.ModelConfig(horizon=chips.PLANNING_HORIZON))
-    events = X.next_events(bootstrap, chips.PLANNING_HORIZON)
+    events = X.next_events(bootstrap, scoring or chips.PLANNING_HORIZON)
     scored = model.expected_points(events)
     ids = [int(scored.loc[scored["web_name"] == n, "id"].iloc[0]) for n in SQUAD_NAMES
            if (scored["web_name"] == n).any()]
@@ -124,3 +124,39 @@ def test_the_commit_floor_falls_to_nothing_at_the_end_of_the_window():
     early = chips.effective_threshold(bootstrap, "bboost", 1)
     late = chips.effective_threshold(bootstrap, "bboost", 19)
     assert early > late == pytest.approx(chips.THRESHOLDS["bboost"])
+
+
+def test_scoring_further_ahead_does_not_change_the_squad_objective():
+    """
+    The chip planner needs to see ten gameweeks; the squad is chosen on five.
+    Scoring the longer list must not widen `xp_horizon`, or the optimiser
+    silently starts maximising something else - a squad built for ten
+    gameweeks, chosen by a function whose comments all say five.
+    """
+    bootstrap, fx, _, _, _ = _state()
+    ps = priors.build_priors(current_team_codes={t["code"]: t["name"] for t in bootstrap["teams"]})
+    model = X.XPModel(bootstrap, fx, ps, X.ModelConfig(horizon=5))
+
+    short = model.expected_points(X.next_events(bootstrap, 5))
+    long = X.XPModel(bootstrap, fx, ps, X.ModelConfig(horizon=5)).expected_points(
+        X.next_events(bootstrap, 10))
+
+    a = short.set_index("id")["xp_horizon"]
+    b = long.set_index("id")["xp_horizon"].reindex(a.index)
+    assert (a - b).abs().max() < 1e-9, "xp_horizon changed when more gameweeks were scored"
+
+    # ...and the longer run really does carry the extra gameweeks.
+    assert "xp_gw" + str(X.next_events(bootstrap, 10)[-1]) in long.columns
+    assert "xp_gw" + str(X.next_events(bootstrap, 10)[-1]) not in short.columns
+
+
+def test_the_planner_sees_the_whole_planning_horizon():
+    """PLANNING_HORIZON claimed ten gameweeks while only five were scored."""
+    bootstrap, fx, scored, events, ids = _state()
+    engine = chips.ChipEngine(bootstrap, fx, scored)
+    horizon = chips.plan_horizon(bootstrap, events[0], {"bboost", "3xc"})
+    values = engine.value_by_gameweek(events[0], {"bboost", "3xc"}, ids, horizon)
+    valued = {gw for (_, gw) in values}
+    assert len(valued) >= min(chips.PLANNING_HORIZON, len(horizon)), (
+        f"only {len(valued)} of {len(horizon)} gameweeks in the horizon were valued"
+    )

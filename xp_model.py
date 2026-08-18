@@ -946,7 +946,14 @@ class XPModel:
 
             out[f"xp_gw{ev}"] = gw_points
             out[f"fixtures_gw{ev}"] = fixture_count
-            horizon_total += gw_points * (self.config.horizon_decay**i)
+            # Only the first `horizon` gameweeks form the squad-selection
+            # objective, however many are scored. Callers pass a longer event
+            # list when something else needs the extra visibility - the chip
+            # planner compares opportunities ten gameweeks out - and widening
+            # xp_horizon to match would silently change what the optimiser is
+            # maximising.
+            if i < self.config.horizon:
+                horizon_total += gw_points * (self.config.horizon_decay**i)
 
         out["xp_next"] = out[f"xp_gw{events[0]}"] if events else 0.0
         out["xp_horizon"] = horizon_total

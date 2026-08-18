@@ -254,7 +254,12 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         logger.critical("%s", e)
         return None
     model = X.XPModel(bootstrap, fixtures, prior_set, X.ModelConfig(horizon=HORIZON))
-    events = X.next_events(bootstrap, HORIZON)
+    # Score further ahead than the squad objective looks. The squad is chosen
+    # on HORIZON gameweeks, but the chip planner needs to see a double or blank
+    # further out to decide whether this week is the right one to spend a chip
+    # on - and PLANNING_HORIZON was claiming ten gameweeks of visibility while
+    # only five were ever scored, so half its horizon was empty.
+    events = X.next_events(bootstrap, max(HORIZON, chips.PLANNING_HORIZON))
     scored = model.expected_points(events)
 
     # Unavailable players are dropped from the buy pool but kept if already
