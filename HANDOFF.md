@@ -152,6 +152,30 @@ Two caveats on those numbers:
 
 ## Open work, highest priority first
 
+### 0. GW1 squad is submitted and verified — 2026-08-18
+
+All twelve transfers went through, the lineup is set, and the result was
+checked against a fresh `/my-team/`: 15/15 players match the target, captain
+Bruno Fernandes, vice Gabriel, £100.0m spent, no chip. Weekly Run is disabled
+again so Friday's cron cannot run `main`'s old bot over the top of it.
+
+**All three payload shapes in section 1 are now answered**, two of them wrong
+in the way the handoff feared:
+
+- `/my-team/` chips carry `{name, id, number, chip_type, start_event,
+  stop_event, status_for_entry, played_by_entry, is_pending}`. There is **no
+  `event` key**, which is what `chips.py` read - so every chip looked unplayed
+  forever. Fixed; both shapes now accepted.
+- `transfers` reports `{"status": "unlimited", "limit": null, "made": 0}`
+  before the first deadline, so the old `(limit or 1) - made` yielded exactly
+  one free transfer during the only week all fifteen were free.
+- **Transfer pairs must match by position.** FPL validates each pair and
+  rejects the whole POST: `transfer_element_type_mismatch`. The id-sorted zip
+  had 8 of 12 pairs refused on a real submission. Fixed, and the client now
+  refuses a mismatched pair before issuing the request.
+
+The fixture is committed at `tests/fixtures/my_team.json`.
+
 ### 1. Verify three API payload shapes, then merge
 
 **In progress.** `dump_my_team.py` plus `.github/workflows/dump_my_team.yml`
