@@ -397,6 +397,32 @@ def build_player_priors(seasons: list[str] | None = None) -> tuple[pd.DataFrame,
     return shrunk, positional
 
 
+def _with_element_type(gw: pd.DataFrame) -> pd.DataFrame | None:
+    """
+    Return the frame with a usable integer `element_type`, or None.
+
+    The historical dataset is third-party and its schema drifts: `position` is
+    a name in some seasons, an integer in others, and `element_type` is present
+    directly in others again. Assuming one of those shapes crashed a CI run on
+    a freshly fetched copy while passing against the copy already on disk, so
+    all three are handled and an unrecognisable season is skipped rather than
+    raising.
+    """
+    df = gw.copy()
+    if "element_type" in df.columns and df["element_type"].notna().any():
+        df["element_type"] = pd.to_numeric(df["element_type"], errors="coerce")
+        return df
+    if "position" not in df.columns:
+        return None
+    if df["position"].dtype == object:
+        df["element_type"] = df["position"].map(POSITION_IDS)
+    else:
+        df["element_type"] = pd.to_numeric(df["position"], errors="coerce")
+    if df["element_type"].isna().all():
+        return None
+    return df
+
+
 # ──────────────── defensive contribution, by club ────────────────
 
 # Minutes a player needs in a season before his defensive rate says anything
@@ -451,10 +477,15 @@ def build_team_dc_factors(seasons: list[str] | None = None) -> dict[int, float]:
             continue
         name_to_code = teams.set_index("name")["code"].to_dict()
 
-        df = gw.copy()
-        if "position" in df.columns and df["position"].dtype == object:
-            df["element_type"] = df["position"].map(POSITION_IDS)
+        df = _with_element_type(gw)
+        if df is None:
+            logger.warning("season %s has no usable position column; skipped for DC factors", season)
+            continue
         df = df[df["element_type"].isin([2, 3])]
+        if "team" not in df.columns:
+            logger.warning("season %s merged_gw has no team column; skipped for DC factors", season)
+            continue
+        df = df.copy()
         df["team_code"] = df["team"].map(name_to_code)
         df = df.dropna(subset=["team_code"])
 

@@ -154,3 +154,32 @@ def test_stale_preseason_totals_are_ignored():
     assert np.allclose(both["xg90"], both["xg90_prior"], atol=1e-9), (
         "pre-season rates must come from the priors alone"
     )
+
+
+@pytest.mark.parametrize("frame,expected", [
+    ({"position": ["GK", "DEF", "MID"]}, [1, 2, 3]),
+    ({"position": [1, 2, 3]}, [1, 2, 3]),
+    ({"element_type": [1, 2, 3]}, [1, 2, 3]),
+    ({"element_type": [1, 2, 3], "position": ["GK", "DEF", "MID"]}, [1, 2, 3]),
+])
+def test_position_schema_variants_are_all_understood(frame, expected):
+    """
+    Regression. The historical dataset is third-party and its schema drifts:
+    `position` is a name in some seasons, an integer in others, and
+    `element_type` is present directly in others again. Assuming one shape
+    crashed a CI run on a freshly fetched copy while passing against the copy
+    already on disk - the exact failure a live submission must never hit.
+    """
+    out = priors._with_element_type(pd.DataFrame(frame))
+    assert out is not None
+    assert list(out["element_type"]) == expected
+
+
+@pytest.mark.parametrize("frame", [
+    {"minutes": [1, 2, 3]},                       # no position column at all
+    {"position": [None, None]},                   # present but empty
+    {"position": ["nonsense", "rubbish"]},        # unmappable names
+])
+def test_an_unusable_season_is_skipped_not_raised(frame):
+    """A schema we cannot read must degrade the priors, never break the run."""
+    assert priors._with_element_type(pd.DataFrame(frame)) is None
