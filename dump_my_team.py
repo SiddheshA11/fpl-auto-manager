@@ -18,8 +18,10 @@ Read-only. It issues no POST and cannot alter the team.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -38,14 +40,24 @@ REDACT_KEYS = {
     "player_region_name", "player_region_iso_code_long", "player_region_iso_code_short",
 }
 
+# `name` means two different things in this payload: the manager's name, which
+# must go, and the chip's name ("bboost", "3xc"), which is the single most
+# important field in the fixture. Redacting by key alone destroyed the latter,
+# so these subtrees are exempt.
+REDACT_EXEMPT_PARENTS = {"chips"}
 
-def redact(obj):
+
+def redact(obj, parent: str | None = None):
     """Recursively blank anything identifying, preserving structure and types."""
     if isinstance(obj, dict):
-        return {k: ("<redacted>" if k in REDACT_KEYS and obj[k] is not None else redact(v))
-                for k, v in obj.items()}
+        return {
+            k: ("<redacted>"
+                if k in REDACT_KEYS and obj[k] is not None and parent not in REDACT_EXEMPT_PARENTS
+                else redact(v, k))
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
-        return [redact(v) for v in obj]
+        return [redact(v, parent) for v in obj]
     return obj
 
 
@@ -101,6 +113,33 @@ def main() -> int:
                     help="where to write the redacted fixture")
     args = ap.parse_args()
 
+    # Check rotation works *before* spending the token, not after.
+    #
+    # This script was first dispatched against `main`, which still carries the
+    # old client - one that looks for GITHUB_TOKEN and never GH_PAT. PingOne
+    # rotates the refresh token on use, so the run authenticated, received a
+    # replacement, failed to store it, and left the stored secret spent. The
+    # workflow file has to live on the default branch for GitHub to register
+    # workflow_dispatch, but the *code* comes from whichever ref is dispatched,
+    # and those were not the same branch.
+    #
+    # A refresh token is a single-use resource. Refusing to start costs nothing;
+    # starting and failing costs the token and locks out every later run.
+    if not os.environ.get("GH_PAT") and not os.environ.get("GITHUB_TOKEN"):
+        logger.critical("no GH_PAT/GITHUB_TOKEN; refusing to spend the refresh token")
+        return 1
+    try:
+        rotation_source = inspect.getsource(FPLClient._update_github_secret)
+    except (OSError, TypeError):
+        rotation_source = ""
+    if "GH_PAT" not in rotation_source:
+        logger.critical(
+            "this checkout's FPLClient cannot read GH_PAT, so a rotated token would be "
+            "discarded and the stored secret left spent. Dispatch against a ref whose "
+            "fpl_client.py supports GH_PAT (rebuild/xp-model or later)."
+        )
+        return 1
+
     client = FPLClient()
     if not client.login():
         logger.critical("authentication failed")
@@ -137,7 +176,7 @@ def main() -> int:
     out.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
     logger.info("wrote %s", out)
 
-    if client.rotation_failed:
+    if getattr(client, "rotation_failed", False):
         logger.critical("token rotation failed; the stored refresh token is now spent")
         return 1
     return 0

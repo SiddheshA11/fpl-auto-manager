@@ -62,6 +62,55 @@ def chip_windows(bootstrap: dict) -> list[dict]:
     return windows
 
 
+def played_chips(my_team: dict | None) -> list[tuple[str, int]]:
+    """
+    Every chip this entry has played, as (name, gameweek).
+
+    Two endpoints describe this and they do not agree, which is why this is a
+    function rather than a comprehension. Verified against a real authenticated
+    response on 2026-08-17, saved at `tests/fixtures/my_team.json`:
+
+    - `/my-team/` returns entries keyed
+      `{name, id, number, chip_type, start_event, stop_event,
+        status_for_entry, played_by_entry, is_pending}`
+      where `played_by_entry` is a list of gameweeks.
+    - `/entry/{id}/history/` returns `{name, event}`.
+
+    This code previously read `c["event"]` against the `/my-team/` payload,
+    where that key does not exist. Every chip therefore looked unplayed
+    forever, and the engine would have re-submitted a chip it had already
+    spent - silently, since FPL simply ignores the second attempt.
+
+    Both shapes are accepted because both endpoints are still read.
+    """
+    out: list[tuple[str, int]] = []
+    for c in (my_team or {}).get("chips") or []:
+        name = c.get("name")
+        if not name:
+            continue
+        for ev in c.get("played_by_entry") or []:
+            out.append((name, int(ev)))
+        ev = c.get("event")
+        if ev is not None:
+            out.append((name, int(ev)))
+    return out
+
+
+def pending_chips(my_team: dict | None) -> set[str]:
+    """
+    Chips already activated for the coming gameweek but not yet locked in.
+
+    `is_pending` is how `/my-team/` reports a chip that has been switched on
+    for a deadline that has not passed. It is not in `played_by_entry` yet, so
+    without this a second run in the same gameweek sees the chip as unplayed
+    and tries to play another one on top of it.
+    """
+    return {
+        c["name"] for c in (my_team or {}).get("chips") or []
+        if c.get("name") and c.get("is_pending")
+    }
+
+
 def available_chips(bootstrap: dict, my_team: dict | None, event: int) -> set[str]:
     """
     Which chips can be played in `event`.
@@ -71,12 +120,8 @@ def available_chips(bootstrap: dict, my_team: dict | None, event: int) -> set[st
     globally instead - as the old code did - retires the second-half chip the
     moment the first-half one is used.
     """
-    played: list[tuple[str, int]] = []
-    if my_team:
-        for c in my_team.get("chips", []) or []:
-            name, ev = c.get("name"), c.get("event")
-            if name and ev is not None:
-                played.append((name, int(ev)))
+    played = played_chips(my_team)
+    pending = pending_chips(my_team)
 
     out = set()
     for w in chip_windows(bootstrap):
@@ -86,9 +131,11 @@ def available_chips(bootstrap: dict, my_team: dict | None, event: int) -> set[st
         if not (start <= event <= stop):
             continue
         used_in_window = any(n == w["name"] and start <= e <= stop for n, e in played)
-        if not used_in_window:
+        if not used_in_window and w["name"] not in pending:
             out.add(w["name"])
 
+    if pending:
+        logger.info("chips already pending for this gameweek: %s", ", ".join(sorted(pending)))
     return out
 
 
