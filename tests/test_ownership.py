@@ -129,3 +129,24 @@ def test_extreme_weight_cannot_make_value_negative(pool):
     """
     opt = O.SquadOptimizer(pool, "xp_horizon", "xp_next", ownership_weight=3.0)
     assert np.all(opt.risk_multiplier >= 0.0)
+
+
+def test_captaincy_is_never_tilted_by_ownership(pool):
+    """
+    The armband is decided on points alone, at every setting of the knob.
+
+    The exposure that matters for a captain is *captaincy* effective ownership,
+    which FPL does not publish. Squad ownership is a proxy that is wrong in a
+    known direction - widely-owned defenders are rarely captained - and it
+    once picked a 5.12 xP defender over a 5.49 xP midfielder on that basis.
+    """
+    for weight in (-0.9, -0.3, 0.0, 0.3, 0.9):
+        sol = O.SquadOptimizer(pool, "xp_horizon", "xp_next",
+                               ownership_weight=weight).build_squad(100.0)
+        chosen = sol.xi.loc[sol.xi["id"] == sol.captain, "xp_next"].iloc[0]
+        assert chosen == pytest.approx(sol.xi["xp_next"].max()), (
+            f"weight {weight}: captained a player who is not the best starter on points"
+        )
+        vice = sol.xi.loc[sol.xi["id"] == sol.vice_captain, "xp_next"].iloc[0]
+        assert vice <= chosen, "the vice must not outscore the captain"
+        assert sol.vice_captain != sol.captain

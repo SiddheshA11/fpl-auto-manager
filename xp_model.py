@@ -45,6 +45,11 @@ POSITION_CODES = {1: "GKP", 2: "DEF", 3: "MID", 4: "FWD"}
 # and the award fires at these counts (100% agreement across 29,757 rows).
 DC_THRESHOLD = {1: None, 2: 10, 3: 12, 4: 12}
 
+# How far a club move may rescale a defensive rate. The measured spread is
+# real but modest, so a ratio outside this band means one side of it came
+# from too small a sample and is damped rather than trusted.
+DC_FACTOR_BOUNDS = (0.75, 1.35)
+
 # Dispersion of the defensive-contribution count around a player's own rate.
 # Population variance/mean is ~2.0, but that is mostly *between* players; once
 # conditioned on a player's own rate the residual is ~1.3, and a plain Poisson
@@ -187,6 +192,23 @@ class XPModel:
         joined = df.join(pri, on="code", rsuffix="_prior")
         w_cur = (mins / (mins + CURRENT_SEASON_WEIGHT_MINUTES)).fillna(0.0)
 
+        # Before a ball is kicked, `minutes` and every counting stat on the
+        # bootstrap still hold *last* season's totals - 400 players carrying up
+        # to 3420 minutes with no gameweek finished. Blending those in as
+        # current-season evidence weights them at 86% for an ever-present, which
+        # double-counts a season the priors already contain and routes around
+        # the shrinkage in priors.py that exists precisely to stop a raw rate
+        # being trusted whole. Until a gameweek has actually been played, the
+        # priors are the only evidence there is.
+        if not any(e.get("finished") for e in self.bootstrap.get("events", [])):
+            played = int((mins > 0).sum())
+            if played:
+                logger.info(
+                    "no gameweek finished yet; ignoring last season's totals on %d players "
+                    "and taking rates from the priors alone", played,
+                )
+            w_cur = pd.Series(0.0, index=df.index)
+
         for col in ["xg90", "xa90", "dc90", "saves90", "bps90", "yellow90", "goals_conceded90"]:
             prior_vals = joined[col] if col in joined.columns else pd.Series(np.nan, index=df.index)
             prior_vals = pd.to_numeric(prior_vals, errors="coerce")
@@ -199,6 +221,8 @@ class XPModel:
             prior_vals = prior_vals.fillna(pos_default)
             cur_vals = current[col].fillna(prior_vals)
             df[col] = w_cur * cur_vals + (1.0 - w_cur) * prior_vals
+
+        df["dc90"] = self._adjust_dc_for_club_move(df, w_cur)
 
         # Start rate. Two things differ from the rate columns above.
         #
@@ -367,6 +391,55 @@ class XPModel:
         if isinstance(val, dict):
             return position.map({pid: float(val.get(code, 0.0)) for pid, code in POSITION_CODES.items()})
         return pd.Series(float(val or 0.0), index=position.index)
+
+    def _adjust_dc_for_club_move(self, df: pd.DataFrame, w_cur: pd.Series) -> pd.Series:
+        """
+        Rescale a transferred player's defensive rate to his new club's style.
+
+        Defensive contribution is the one scoring term that is as much a
+        property of the side as of the player: it counts tackles,
+        interceptions, clearances and recoveries, and a team that keeps the
+        ball has fewer of them to make. The measured spread across 2025-26 runs
+        0.86 to 1.13 relative to the league mean.
+
+        That is a modest correction, but the award is a *threshold* - two
+        points at ten actions for a defender, twelve for a midfielder - so it
+        matters most exactly where it is most likely to bite: a player whose
+        rate sits just above the line at a low-possession club can drop below
+        it at a high-possession one on a shift far smaller than the raw
+        percentage suggests.
+
+        Only the prior is adjusted. Minutes played for the current club need no
+        correction - they were earned in the style being corrected for - so the
+        rescaling fades out as the season supplies real evidence.
+        """
+        dc90 = pd.to_numeric(df["dc90"], errors="coerce")
+        factors = self.priors.team_dc_factor
+        prior_team = self.priors.player_dc_team
+        if not factors or prior_team is None or prior_team.empty:
+            return dc90
+
+        old_code = df["code"].map(prior_team)
+        old_factor = old_code.map(factors)
+        new_factor = df["team_code"].map(factors)
+
+        # A player with no history, or at a club with no measured factor, is
+        # left alone rather than pushed toward an average he was never near.
+        ratio = (new_factor / old_factor).astype(float)
+        ratio = ratio.where(np.isfinite(ratio), 1.0).fillna(1.0)
+        ratio = ratio.clip(*DC_FACTOR_BOUNDS)
+
+        # Only the prior share of the blend is rescaled.
+        prior_share = (1.0 - pd.to_numeric(w_cur, errors="coerce").fillna(0.0))
+        effective = 1.0 + (ratio - 1.0) * prior_share
+
+        moved = (old_code.notna() & df["team_code"].notna() & (old_code != df["team_code"]))
+        adjusted = dc90.where(~moved, dc90 * effective)
+
+        n_moved = int((moved & (effective - 1.0).abs().gt(0.01)).sum())
+        if n_moved:
+            logger.info("defensive contribution rescaled for %d players who changed club", n_moved)
+        return adjusted
 
     def _expected_bonus(self, bps90: pd.Series, minutes_share: pd.Series) -> pd.Series:
         """Interpolate the empirical BPS-to-bonus curve, scaled by minutes."""

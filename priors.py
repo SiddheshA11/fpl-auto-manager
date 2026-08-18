@@ -104,6 +104,10 @@ class PriorSet:
     teams: dict[int, TeamStrength] = field(default_factory=dict)   # keyed by team `code`
     league_mean_goals: float = 1.45            # goals per team per match
     positional: pd.DataFrame | None = None     # per-position mean rates
+    # Defensive-contribution volume by club, and the club each player's own
+    # rate was earned at, so a summer transfer can be corrected for style.
+    team_dc_factor: dict[int, float] = field(default_factory=dict)
+    player_dc_team: pd.Series | None = None
 
     def team_by_code(self, code: int) -> TeamStrength | None:
         return self.teams.get(code)
@@ -393,6 +397,142 @@ def build_player_priors(seasons: list[str] | None = None) -> tuple[pd.DataFrame,
     return shrunk, positional
 
 
+# ──────────────── defensive contribution, by club ────────────────
+
+# Minutes a player needs in a season before his defensive rate says anything
+# about his club's style rather than about a handful of cameo appearances.
+DC_TEAM_MIN_MINUTES = 900
+
+# How far a club move is allowed to move a player's defensive rate. The
+# measured spread between clubs is real but modest - roughly 7 to 9 actions per
+# 90 across the league - so a ratio far outside this band means one side of it
+# was estimated from too little data, and the safe response is to damp it.
+DC_FACTOR_BOUNDS = (0.75, 1.35)
+
+
+def build_team_dc_factors(seasons: list[str] | None = None) -> dict[int, float]:
+    """
+    Per-club defensive-contribution volume, relative to the league mean.
+
+    Defensive contribution is the one scoring term that is as much a property
+    of the club as of the player: it counts tackles, interceptions, clearances
+    and recoveries, and a side that keeps the ball simply has fewer of them to
+    make. Measured over 2025-26, the spread runs from 6.9 actions per 90 at
+    Liverpool to 9.1 at Everton - a 32% difference between the extremes that
+    has nothing to do with the individuals involved.
+
+    Returned as a multiplier keyed by team `code`, where 1.0 is league average.
+    Only defenders and midfielders count: goalkeepers score no defensive
+    contribution points, and forwards make too few actions for the average to
+    be stable.
+    """
+    seasons = seasons or available_seasons()
+    if not seasons:
+        return {}
+
+    ordered = sorted(seasons, reverse=True)
+    totals: dict[int, float] = {}
+    weights: dict[int, float] = {}
+
+    for i, season in enumerate(ordered):
+        loaded = load_season(season)
+        if loaded is None:
+            continue
+        gw, _raw, _fx = loaded
+        if "defensive_contribution" not in gw.columns or gw["defensive_contribution"].isna().all():
+            # Seasons before 2025-26 predate the stat entirely.
+            continue
+        try:
+            teams = pd.read_csv(_season_dir(season) / "teams.csv")
+        except (FileNotFoundError, pd.errors.EmptyDataError):
+            logger.warning("season %s missing teams.csv; skipped for DC factors", season)
+            continue
+        if "name" not in teams.columns or "code" not in teams.columns:
+            continue
+        name_to_code = teams.set_index("name")["code"].to_dict()
+
+        df = gw.copy()
+        if "position" in df.columns and df["position"].dtype == object:
+            df["element_type"] = df["position"].map(POSITION_IDS)
+        df = df[df["element_type"].isin([2, 3])]
+        df["team_code"] = df["team"].map(name_to_code)
+        df = df.dropna(subset=["team_code"])
+
+        per_player = df.groupby(["team_code", "element"]).agg(
+            minutes=("minutes", "sum"),
+            dc=("defensive_contribution", "sum"),
+        ).reset_index()
+        per_player = per_player[per_player["minutes"] >= DC_TEAM_MIN_MINUTES]
+        if per_player.empty:
+            continue
+        per_player["dc90"] = per_player["dc"] * 90.0 / per_player["minutes"]
+
+        league_mean = float(per_player["dc90"].mean())
+        if not np.isfinite(league_mean) or league_mean <= 0:
+            continue
+
+        weight = SEASON_DECAY**i
+        for code, group in per_player.groupby("team_code"):
+            factor = float(group["dc90"].mean()) / league_mean
+            code = int(code)
+            totals[code] = totals.get(code, 0.0) + factor * weight
+            weights[code] = weights.get(code, 0.0) + weight
+
+    factors = {code: totals[code] / weights[code] for code in totals if weights[code] > 0}
+    if factors:
+        logger.info(
+            "DC club factors: %d teams, range %.2f-%.2f",
+            len(factors), min(factors.values()), max(factors.values()),
+        )
+    return factors
+
+
+def build_player_dc_team(seasons: list[str] | None = None) -> pd.Series:
+    """
+    The club each player's defensive rate was actually earned at, by `code`.
+
+    Needed because the rate is only meaningful alongside the side that produced
+    it. A player who moves clubs carries his old club's volume into the new
+    one's style, and defensive contribution is a *threshold* award - two points
+    at ten actions for a defender, twelve for a midfielder - so a rate sitting
+    just above the line is far more fragile than the size of the shift implies.
+    """
+    seasons = seasons or available_seasons()
+    if not seasons:
+        return pd.Series(dtype=float)
+
+    ordered = sorted(seasons, reverse=True)
+    rows = []
+    for i, season in enumerate(ordered):
+        loaded = load_season(season)
+        if loaded is None:
+            continue
+        gw, raw, _fx = loaded
+        try:
+            teams = pd.read_csv(_season_dir(season) / "teams.csv")
+        except (FileNotFoundError, pd.errors.EmptyDataError):
+            continue
+        if "name" not in teams.columns or "code" not in teams.columns:
+            continue
+        name_to_code = teams.set_index("name")["code"].to_dict()
+
+        df = gw.copy()
+        df["team_code"] = df["team"].map(name_to_code)
+        df = df.dropna(subset=["team_code", "code"])
+        agg = df.groupby(["code", "team_code"])["minutes"].sum().reset_index()
+        agg["weighted"] = agg["minutes"] * (SEASON_DECAY**i)
+        rows.append(agg[["code", "team_code", "weighted"]])
+
+    if not rows:
+        return pd.Series(dtype=float)
+
+    allr = pd.concat(rows).groupby(["code", "team_code"])["weighted"].sum().reset_index()
+    # The club he played the most weighted minutes for is the one his rate
+    # describes; a mid-season mover is attributed to wherever he played more.
+    best = allr.sort_values("weighted").groupby("code").tail(1)
+    return best.set_index("code")["team_code"].astype(int)
+
+
 # ──────────────────────── team strength ────────────────────────
 
 
@@ -498,4 +638,11 @@ def build_priors(seasons: list[str] | None = None, current_team_codes: dict[int,
     """Build the full prior set. This is the entry point the xP model calls."""
     players, positional = build_player_priors(seasons)
     teams, league_mean = build_team_strength(seasons, current_team_codes)
-    return PriorSet(players=players, teams=teams, league_mean_goals=league_mean, positional=positional)
+    return PriorSet(
+        players=players,
+        teams=teams,
+        league_mean_goals=league_mean,
+        positional=positional,
+        team_dc_factor=build_team_dc_factors(seasons),
+        player_dc_team=build_player_dc_team(seasons),
+    )

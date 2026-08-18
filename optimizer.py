@@ -213,15 +213,25 @@ class SquadOptimizer:
             cons.append(LinearConstraint(block(squad=self.cost), 0, budget))
 
         # Maximise: starters at full value, bench at a fraction, captain doubled.
-        # The ownership tilt scales every block identically, so it re-weights
-        # players against each other without disturbing the balance between
-        # starting, benching and captaining any one of them.
+        # The ownership tilt scales squad and XI membership identically, so it
+        # re-weights players against each other without disturbing the balance
+        # between starting and benching any one of them.
+        #
+        # Captaincy is deliberately left untilted. The exposure that matters for
+        # an armband is *captaincy* effective ownership, not squad ownership,
+        # and the two come apart badly: a defender owned by 29% of managers may
+        # be captained by almost none of them, while a midfielder owned by 49%
+        # takes the armband from a quarter of the field. FPL publishes the
+        # former and not the latter, so tilting the captain on squad ownership
+        # applies a proxy that is wrong in a known direction - it read Gabriel
+        # at 5.12 xP as a better captain than Bruno Fernandes at 5.49 purely
+        # because fewer people own him. Captaincy doubles a score and is the
+        # highest-leverage call of the week; it gets made on points.
         value = self.value * self.risk_multiplier
-        captain_value = self.captain_value * self.risk_multiplier
         objective = np.concatenate([
             -value * self.bench_weight,                           # owned (bench share)
             -value * (1.0 - self.bench_weight),                   # promoted to XI
-            -captain_value,                                       # captaincy doubles the score
+            -self.captain_value,                                  # captaincy doubles the score
         ])
         return objective, cons
 
