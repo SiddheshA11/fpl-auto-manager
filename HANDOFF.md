@@ -1,7 +1,51 @@
 # Handoff — FPL Auto Manager rebuild
 
-Written 2026-08-17. Branch `rebuild/xp-model`, 14 commits, **pushed to origin**,
-working tree clean, 39 tests passing.
+Written 2026-08-17, updated the same day. Branch `rebuild/xp-model`, 20 commits,
+**pushed to origin**, working tree clean, 65 tests passing.
+
+## Read this first: GW1 deadline is Fri 21 Aug 2026, 17:30 UTC
+
+Transfers are **unlimited and free until that deadline**, which resolves the
+wildcard question below: the ~21 xP rebuild is free right now, so take it and
+keep both wildcards. Wildcard 1 covers GW2-19, wildcard 2 GW20-38.
+
+No player's price has moved from its starting value (0 of 590), so the budget
+is exactly £100.0m regardless of what is currently owned.
+
+### Decisions taken
+
+- **Ownership**: added as a signed tilt, `OWNERSHIP_WEIGHT` in `config.py`,
+  set to **-0.3** (differentials) because the target is a private league of
+  ~20. Positive would track the template and suit overall rank instead. The
+  derivation is in the `OWNERSHIP_WEIGHT` comment in `optimizer.py`; note that
+  a *mean* differential term is algebraically inert, so this acts on variance.
+- **Wildcard**: not played. Superseded by the free pre-deadline rebuild.
+
+### Four bugs found and fixed since the original handoff
+
+1. **Pre-season transfers.** `manager.py` read `(limit or 1) - made`, and FPL
+   publishes no numeric limit while transfers are unlimited, so the bot saw one
+   free transfer during the only week it had fifteen. Measured on the snapshot:
+   3 transfers and 2 hits (-8 pts) where the whole squad was free to replace.
+2. **Stale pre-season totals.** Before a ball is kicked the bootstrap still
+   carries *last* season's totals - 400 players with up to 3420 minutes, zero
+   gameweeks finished. These were blended in as current-season evidence at 86%
+   weight for an ever-present, double-counting a season the priors already hold
+   and bypassing the shrinkage in `priors.py`. This was the largest of the four.
+3. **XI chosen on the horizon.** Squad membership is a horizon decision; the
+   starting eleven is a one-week decision. The joint solve used the horizon
+   column for both, benching players worth more *this* gameweek. +0.5 xP per
+   gameweek, ~19 over a season.
+4. **Defensive contribution across club moves.** DC is as much a club property
+   as a player one; the 2025-26 spread runs 0.86-1.13 relative to the league
+   mean. Transferred players carried their old club's volume into their new
+   club's style, and because DC is a *threshold* award a rate just above the
+   line is fragile. Press coverage of Anderson's move to City implies possession
+   guts his returns; the measured effect is 10%, not 50%.
+
+Also removed the ownership tilt from the captaincy decision - captaincy
+effective ownership is not squad ownership, FPL does not publish it, and the
+proxy had started captaining a 5.12 xP defender over a 5.49 xP midfielder.
 
 ## What this project is
 
@@ -109,6 +153,16 @@ Two caveats on those numbers:
 ## Open work, highest priority first
 
 ### 1. Verify three API payload shapes, then merge
+
+**In progress.** `dump_my_team.py` plus `.github/workflows/dump_my_team.yml`
+capture a real authenticated `/my-team/` alongside `/entry/{id}/history/`
+chips, redacted, as a committed fixture. Read-only; it issues no POST.
+
+It runs in CI rather than locally because PingOne rotates the refresh token on
+use, so a local run spends the stored token and the replacement never reaches
+the GitHub secret. **Blocked on the workflow file reaching `main`** - GitHub
+only registers `workflow_dispatch` for workflows on the default branch. The
+commit exists locally on `main`; it needs pushing.
 
 Still unverified. The dry run proved the code does not crash, but each of these
 needs a *live* interaction to settle, and each is a deadline-time submission
