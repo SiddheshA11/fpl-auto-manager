@@ -171,6 +171,48 @@ def latest_snapshot(data_dir: Path | str, name: str) -> Path | None:
 # ──────────────────────── the model ────────────────────────
 
 
+def _allocate_shirts(weights: pd.Series, shirts: float, cap: float = 0.98) -> pd.Series:
+    """
+    Distribute `shirts` across a group in proportion to `weights`, capped.
+
+    Clipping after scaling silently destroys the mass above the cap instead of
+    giving it to somebody else, and a shirt handed to nobody is a shirt nobody
+    plays in. Measured across the pool that leaked 0.25 of every team's eleven
+    and 5.4% of its minutes - 937 against the 990 a side actually plays - which
+    scales every per-90 term in the model and surfaces as a flat negative bias
+    in expected points.
+
+    Surplus is therefore redistributed, and repeated, since redistribution can
+    push a second player over the cap. Two constraints make this narrower than
+    it first appears:
+
+    - only players with a positive weight may receive any. A zero means
+      unavailable - injured, suspended, sold - and handing a shirt to a player
+      who cannot play resurrects him. That is not hypothetical: the first
+      version of this did exactly that, and injured players started scoring.
+    - the loop is bounded, because a squad thinner than the shirts available
+      genuinely cannot fill them and there is nothing to converge to.
+    """
+    weights = weights.astype(float).clip(lower=0.0)
+    eligible = weights > 0.0
+    total = float(weights.sum())
+    if total <= 1e-12 or not eligible.any():
+        return pd.Series(0.0, index=weights.index)
+
+    out = weights * (shirts / total)
+    for _ in range(8):
+        out = out.clip(upper=cap)
+        deficit = shirts - float(out.sum())
+        if deficit <= 1e-9:
+            break
+        headroom = eligible & (out < cap)
+        room = cap - out[headroom]
+        if not headroom.any() or float(room.sum()) <= 1e-12:
+            break
+        out.loc[headroom] += room * min(1.0, deficit / float(room.sum()))
+    return out.where(eligible, 0.0)
+
+
 class XPModel:
     """Expected points for every player over a horizon of gameweeks."""
 
@@ -469,7 +511,7 @@ class XPModel:
                     # publishes availability.
                     out.loc[sel] = min(shirts / len(sel), 1.0)
                     continue
-                out.loc[sel] = (weights * (shirts / total)).clip(upper=0.98)
+                out.loc[sel] = _allocate_shirts(weights, shirts)
 
         return out.clip(0.0, 1.0)
 

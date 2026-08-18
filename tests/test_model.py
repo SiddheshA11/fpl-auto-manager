@@ -326,3 +326,52 @@ def test_zero_gain_transfer_is_declined():
     # Same pool, same budget: there is nothing to gain.
     sol = opt.optimise_transfers(ids, bank=0.0, free_transfers=1, max_hits=0)
     assert len(sol.transfers_in) == 0, "should stand pat when no transfer improves the squad"
+
+
+def test_every_team_starts_exactly_eleven_players():
+    """
+    Eleven shirts are worn in every match, so the start probabilities in a team
+    must sum to eleven. The allocation clipped each player at 0.98 *after*
+    scaling, which discarded the mass above the cap instead of giving it to
+    somebody else: teams were allocated 10.75 shirts and 937 of the 990 minutes
+    a side actually plays. A shortfall in minutes scales every per-90 term in
+    the model, so it surfaced as a flat negative bias in expected points.
+    """
+    from pathlib import Path
+
+    import priors
+    import xp_model as X
+
+    snaps = Path(__file__).resolve().parent.parent / "data" / "snapshots"
+    bs_files = sorted(snaps.glob("bootstrap-static_*.json.gz"), reverse=True)
+    if not bs_files:
+        pytest.skip("no snapshot committed")
+    bootstrap = X.load_snapshot(bs_files[0])
+    fixtures = X.load_snapshot(sorted(snaps.glob("fixtures_*.json.gz"), reverse=True)[0])
+    model = X.XPModel(bootstrap, fixtures, priors.build_priors(), X.ModelConfig(horizon=5))
+
+    mm = model.minutes_model(X.next_events(bootstrap, 5)[0])
+    per_team = pd.DataFrame({"team": model.players["team"], "p": mm["p_start"]}).groupby("team")["p"].sum()
+    assert per_team.min() > 10.9, f"a team was allocated only {per_team.min():.2f} shirts"
+    assert per_team.max() < 11.1
+    assert per_team.mean() == pytest.approx(11.0, abs=0.05)
+
+
+def test_shirt_allocation_redistributes_rather_than_discarding():
+    """The unit behind the above: surplus above the cap goes to someone else."""
+    import xp_model as X
+
+    # One overwhelming favourite plus three fringe players, for one shirt.
+    out = X._allocate_shirts(pd.Series([20.0, 1.0, 1.0, 1.0]), shirts=1.0, cap=0.98)
+    assert out.max() <= 0.98 + 1e-9, "the cap must still bind"
+    assert out.sum() == pytest.approx(1.0, abs=1e-6), "the shirt must go to somebody"
+
+    # An unavailable player has zero weight and must stay at zero. The first
+    # version redistributed to anyone under the cap and duly resurrected
+    # injured players, who began scoring points while ruled out.
+    with_injury = X._allocate_shirts(pd.Series([5.0, 5.0, 0.0]), shirts=2.0, cap=0.98)
+    assert with_injury.iloc[2] == 0.0, "a player with no chance of playing was given one"
+
+    # A squad thinner than the shirts available cannot fill them; terminate.
+    capped = X._allocate_shirts(pd.Series([1.0, 1.0]), shirts=10.0, cap=0.98)
+    assert capped.sum() == pytest.approx(1.96, abs=1e-6)
