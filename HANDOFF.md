@@ -1,288 +1,133 @@
-# Handoff — FPL Auto Manager rebuild
+# Handoff — FPL Auto Manager
 
-Written 2026-08-17, updated the same day. Branch `rebuild/xp-model`, 20 commits,
-**pushed to origin**, working tree clean, 65 tests passing.
+Updated 2026-08-19. **Deployed**: `main` runs the expected-points model and
+Weekly Run is enabled. 146 tests.
 
-## Read this first: GW1 deadline is Fri 21 Aug 2026, 17:30 UTC
+## State
 
-Transfers are **unlimited and free until that deadline**, which resolves the
-wildcard question below: the ~21 xP rebuild is free right now, so take it and
-keep both wildcards. Wildcard 1 covers GW2-19, wildcard 2 GW20-38.
-
-No player's price has moved from its starting value (0 of 590), so the budget
-is exactly £100.0m regardless of what is currently owned.
-
-### Decisions taken
-
-- **Ownership**: added as a signed tilt, `OWNERSHIP_WEIGHT` in `config.py`,
-  set to **-0.3** (differentials) because the target is a private league of
-  ~20. Positive would track the template and suit overall rank instead. The
-  derivation is in the `OWNERSHIP_WEIGHT` comment in `optimizer.py`; note that
-  a *mean* differential term is algebraically inert, so this acts on variance.
-- **Wildcard**: not played. Superseded by the free pre-deadline rebuild.
-
-### Four bugs found and fixed since the original handoff
-
-1. **Pre-season transfers.** `manager.py` read `(limit or 1) - made`, and FPL
-   publishes no numeric limit while transfers are unlimited, so the bot saw one
-   free transfer during the only week it had fifteen. Measured on the snapshot:
-   3 transfers and 2 hits (-8 pts) where the whole squad was free to replace.
-2. **Stale pre-season totals.** Before a ball is kicked the bootstrap still
-   carries *last* season's totals - 400 players with up to 3420 minutes, zero
-   gameweeks finished. These were blended in as current-season evidence at 86%
-   weight for an ever-present, double-counting a season the priors already hold
-   and bypassing the shrinkage in `priors.py`. This was the largest of the four.
-3. **XI chosen on the horizon.** Squad membership is a horizon decision; the
-   starting eleven is a one-week decision. The joint solve used the horizon
-   column for both, benching players worth more *this* gameweek. +0.5 xP per
-   gameweek, ~19 over a season.
-4. **Defensive contribution across club moves.** DC is as much a club property
-   as a player one; the 2025-26 spread runs 0.86-1.13 relative to the league
-   mean. Transferred players carried their old club's volume into their new
-   club's style, and because DC is a *threshold* award a rate just above the
-   line is fragile. Press coverage of Anderson's move to City implies possession
-   guts his returns; the measured effect is 10%, not 50%.
-
-Also removed the ownership tilt from the captaincy decision - captaincy
-effective ownership is not squad ownership, FPL does not publish it, and the
-proxy had started captaining a 5.12 xP defender over a 5.49 xP midfielder.
-
-## What this project is
-
-Fully automated Fantasy Premier League manager. Runs on GitHub Actions, picks
-transfers, lineup, captain, bench order and chips, and submits them without
-intervention. The owner wants to win his league and does not want to check in
-weekly. He has chosen **full auto with notification after the fact**: the bot
-acts on its own and reports what it did and why.
-
-## Status: working, tested against the live account, not yet deployed
-
-Verified on 2026-08-17 by dispatching the weekly run in dry-run mode against
-the real account (run `32073377269`, 47s, passed):
-
-- Authentication succeeds; the refresh token and team id pair correctly.
-- **Token rotation succeeds** — the run consumed a token, received a
-  replacement and wrote it back to the GitHub secret. This was silently broken
-  for the whole of last season and is why the old bot died.
-- The full pipeline runs in CI: priors → xP model → MILP optimiser → chip
-  valuation → lineup construction.
-- Chip logic correctly declined bench boost (7.8 xP against a 12.0 threshold)
-  and correctly treated wildcard and free hit as unavailable in GW1.
-
-**Nothing is deployed.** `main` is still the old heuristic bot. GitHub Actions
-runs `main`, so merging the branch is what makes any of this live.
-
-## Account and secrets — all current
-
-| secret | state |
+| | |
 |---|---|
-| `FPL_REFRESH_TOKEN` | rotates automatically every run; do not set by hand unless rotation breaks |
-| `FPL_TEAM_ID` | `5413589` — "Siddhesh's Team", verified against the live API |
-| `GH_PAT` | required for rotation; set 2026-02-09, **check it has not expired** |
-| `FPL_EMAIL` / `FPL_PASSWORD` | only used by `token_refresh.py`, which is disabled |
+| team | 5413589, GW1 squad submitted and verified against `/my-team/` |
+| GW1 deadline | Fri 21 Aug 2026 17:30 UTC |
+| Weekly Run | **active**, cron `0 10 * * 5` — Fri 10:00 UTC, 7.5h before the deadline |
+| Scheduler | deliberately **disabled** — its dedup marker writes to `/tmp` on an ephemeral runner so it never persists, and alongside the cron it can fire five times per deadline |
+| Tests | run in CI on the resolved dependency versions (`tests.yml`) |
+| accuracy | MAE 0.97, RMSE 1.96, R² 0.319 on GW10-38 of 2025-26 |
 
-`FPL_COOKIE` was deleted — it was four months stale and `login()` tried it
-first, wasting a failed attempt every run.
+Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R² 0.29-0.35 (Valouxis,
+NTUA 2023, n=6900, several compared models being paid products). **Those are
+2022/23 numbers and three seasons stale** — treat as a floor, not a target. A
+naive points-per-game baseline scores R² 0.257 on the same data, so the honest
+read is that we are just inside a dated band, not at the frontier.
 
-Two Premier League accounts exist and caused confusion during setup. Premier
-League mail lands in `siddheshagarwal10@gmail.com`; a browser session captured
-the same day carried an id_token for `siddheshrox123@gmail.com`. This is now
-moot — team `5413589` authenticates successfully with the stored token, which
-is the only thing that matters. **The invariant to remember:**
-`FPL_REFRESH_TOKEN` and `FPL_TEAM_ID` must belong to the same account, because
-a mismatch returns 403 and reads exactly like an expired token.
+## The single most important fact about this model
 
-## Workflow state
+Decomposing 22,774 player-gameweeks:
 
 ```
-Deadline Check    active              (workflow_dispatch only — no schedule)
-Weekly Run        disabled_manually   ← enable to go live
-Scheduler         disabled_inactivity
-Token Refresh     disabled_manually   ← leave off, see below
-Token Reminder    disabled_inactivity
+our model                                        R2 0.271
+perfect appearance only (played at all, yes/no)     0.363
+perfect minutes, scaling our xP                     0.440
+actual minutes alone, no model of ability at all    0.491
 ```
 
-GitHub auto-disabled these after 60 days of repo inactivity over the summer.
-`Weekly Run` was briefly enabled on 2026-08-17 to run the dry-run test, then
-disabled again.
+**Minutes is not one lever among several. It is the lever.** The entire
+goals / assists / clean-sheet / bonus / defensive-contribution apparatus is
+worth 0.004 R² once minutes are known. Any future work that is not about
+minutes should justify itself against that number.
 
-## What was rebuilt
+Acting on it — folding recent minutes into the start rate — moved R² from
+0.269 to 0.319, the largest single improvement made.
 
-The heuristic core was replaced. It scored players on a unitless 0-1 weighted
-composite, then multiplied by 10 and compared that against a -4 transfer hit —
-so every threshold in the system was arbitrary.
+## Open work
 
-| file | role |
-|---|---|
-| `priors.py` | Per-90 priors with position-aware shrinkage; team strength; promoted-club priors |
-| `xp_model.py` | Expected points in real FPL points. Minutes model, threshold-based defensive contribution, empirical bonus curve, scoring read live from `game_config` |
-| `optimizer.py` | MILP over squad + XI + captain jointly, via scipy HiGHS. Hits priced as an actual -4 |
-| `chips.py` | Chip availability across both half-season windows; chip value in expected points; DGW/BGW detection |
-| `manager.py` | Weekly run orchestrator (unattended, submits real transfers) |
-| `deadline_check.py` | Pre-deadline safety: re-reads availability, repairs lineup only, makes no transfers |
-| `backtest.py` | Replays a past season with priors restricted to strictly earlier seasons |
-| `recommend.py` | CLI: `--build` for a squad from scratch, `--transfer` for moves |
-| `fetch_data.py` | Live API snapshots + the vaastav historical dataset |
+### 1. Multi-gameweek transfer sequencing — the largest remaining gap
 
-Deleted (~1,400 lines): `web_research.py`, `news_researcher.py`,
-`player_scorer.py`, `transfer_optimizer.py`, `team_selector.py`,
-`chip_strategy.py`. The scrapers pulled xG and injury flags the FPL API now
-returns directly, and the sites had begun blocking them.
+Transfers are one-step greedy: this week's move optimised against a 5-gameweek
+horizon, with no plan for a *sequence*. Bank a transfer now to make a double
+move next week, route toward a wildcard, take a hit early to catch a fixture
+swing — none of it is modelled. This is what FPL Copilot claims as its
+advantage, and chips already work this way (`chips.solve_assignment`); transfers
+do not.
 
-## Validation
+### 2. Rank-aware objective
 
-Backtested over 33 gameweeks of 2025-26 against a points-per-game baseline:
+The optimiser maximises expected points. The goal is winning a ~20-person
+league, and those diverge: with a lead you want to track the field, trailing in
+April you need variance the mean objective refuses to buy.
 
-- top-20 picks: **+0.120** actual points per player per gameweek
-- top-30 picks: **+0.128**, winning in 58% of gameweeks
-- rank correlation, players who appeared: 0.315 vs 0.292
+Everything needed exists and is wired to nothing: `league_analyzer.py` computes
+rival ownership and **rival captain rates**, and is imported by no file. The
+ownership tilt currently runs on `selected_by_percent`, the 11-million-player
+template, when the field is 19 specific people. Captaincy is where this bites
+hardest.
 
-**Known weakness:** the model *loses* on all-players rank correlation (0.630 vs
-0.690). That gap is ordering players who never appear, which points-per-game
-wins by construction. It matters for transfer suggestions more than squad
-picks, and the minutes model is where to fix it.
+Blocked until a gameweek completes: `/entry/{id}/event/{gw}/picks/` returns
+nothing before then.
 
-Two caveats on those numbers:
+### 3. Team value and price changes
 
-- Per-gameweek standard error on top-20 is ~0.18, so differences below that
-  are not resolvable with one season.
-- **The backtest ran on 2025-26, under the old Bonus Points System.** FPL
-  rebalanced BPS for 26/27, so the measured edge assumes it transfers across a
-  rules change, and partly it will not. See item 4 below.
+`price_change_percent` is unused. This was measured as **worthless** at the old
+-0.3 tilt, because the budget constraint was not binding — the model refused to
+spend past £102.5m. At the current +0.20 it spends the full £100m, so it now
+matters again. Caveat from the data: across two seasons there were 41-55 risers
+against 450-524 fallers, and the average established player *loses* £0.11m, so
+"build team value" is a thinner edge than folklore suggests.
 
-## Open work, highest priority first
+### 4. Refit the bonus curve, per position, around GW8-10
 
-### 0. GW1 squad is submitted and verified — 2026-08-18
+`BONUS_CURVE_BPS`/`BONUS_CURVE_PTS` are fitted to old-BPS seasons.
+`BONUS_POSITION_MULTIPLIER` corrects the positional error (measured: forwards
+earn 1.65x a midfielder's bonus at matched BPS) but the curve itself is stale.
+Note the 2026/27 BPS rebalance was measured as worth **under 1 point a season**
+for defenders — much smaller than feared.
 
-All twelve transfers went through, the lineup is set, and the result was
-checked against a fresh `/my-team/`: 15/15 players match the target, captain
-Bruno Fernandes, vice Gabriel, £100.0m spent, no chip. Weekly Run is disabled
-again so Friday's cron cannot run `main`'s old bot over the top of it.
+### 5. Variance is calibrated in level but not in shape
 
-**All three payload shapes in section 1 are now answered**, two of them wrong
-in the way the handoff feared:
+`sd_next` exists and is calibrated overall (ratio 1.000), but per-bucket ratios
+run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
+to price a tail.
+
+## Things that will bite you
+
+- **`--ref` selects the code, not the workflow registration.** A workflow must
+  exist on the default branch for `workflow_dispatch` to register, but the code
+  that runs comes from the ref you dispatch. Dispatching against `main` when
+  the fix was on a branch ran the old client, discarded a rotated refresh token
+  and locked the account out. `dump_my_team.py` now refuses to start if the
+  checkout cannot persist a rotated token.
+- **Never chain `gh workflow disable` onto `gh workflow run`.** The run is only
+  queued, so the disable lands first and the run sticks in `queued` with zero
+  jobs, permanently. Re-enabling does not revive it. This silently swallowed a
+  live submission.
+- **Scheduled runs always use the default branch**, whatever you dispatch.
+- **A refresh token is single-use.** It rotates on use; a run that authenticates
+  and fails to persist the replacement leaves the secret spent. Set it with
+  `gh secret set FPL_REFRESH_TOKEN` reading stdin, and strip the quotes — a
+  value copied from DevTools carries them and PingOne answers "Failed to decode
+  refresh token".
+- **CI and local resolve different dependency versions.** pandas 3 gives text
+  columns a dedicated string dtype, which silently falsified a
+  `dtype == object` check, stripped the position off every player prior and
+  halved the squad's expected points with all 113 tests green. Requirements now
+  carry upper bounds and CI logs what it resolved.
+- **Tests that exercise a helper do not prove the helper is called.** Three
+  separate fixes could be deleted from production with the whole suite green.
+  Prefer an end-to-end test that inspects what the client was actually handed.
+
+## Verified API facts
+
+Settled by live interaction, not documentation. Fixture: `tests/fixtures/my_team.json`.
 
 - `/my-team/` chips carry `{name, id, number, chip_type, start_event,
-  stop_event, status_for_entry, played_by_entry, is_pending}`. There is **no
-  `event` key**, which is what `chips.py` read - so every chip looked unplayed
-  forever. Fixed; both shapes now accepted.
-- `transfers` reports `{"status": "unlimited", "limit": null, "made": 0}`
-  before the first deadline, so the old `(limit or 1) - made` yielded exactly
-  one free transfer during the only week all fifteen were free.
-- **Transfer pairs must match by position.** FPL validates each pair and
-  rejects the whole POST: `transfer_element_type_mismatch`. The id-sorted zip
-  had 8 of 12 pairs refused on a real submission. Fixed, and the client now
-  refuses a mismatched pair before issuing the request.
-
-The fixture is committed at `tests/fixtures/my_team.json`.
-
-### 1. Verify three API payload shapes, then merge
-
-**In progress.** `dump_my_team.py` plus `.github/workflows/dump_my_team.yml`
-capture a real authenticated `/my-team/` alongside `/entry/{id}/history/`
-chips, redacted, as a committed fixture. Read-only; it issues no POST.
-
-It runs in CI rather than locally because PingOne rotates the refresh token on
-use, so a local run spends the stored token and the replacement never reaches
-the GitHub secret. **Blocked on the workflow file reaching `main`** - GitHub
-only registers `workflow_dispatch` for workflows on the default branch. The
-commit exists locally on `main`; it needs pushing.
-
-Still unverified. The dry run proved the code does not crash, but each of these
-needs a *live* interaction to settle, and each is a deadline-time submission
-failure if the guess is wrong.
-
-- `chips.py:74-79` expects `my_team["chips"]` entries shaped `{"name", "event"}`
-  — the `/entry/{id}/history/` format. `/my-team/` may instead return
-  `status_for_entry` / `played_by_entry`. Nothing has been played yet, so both
-  shapes look identical (empty) and the dry run could not distinguish them. If
-  wrong, played chips are never detected and the engine re-submits a spent one.
-- `deadline_check.py` posts `{"chip": None}`. If the weekly run activated
-  bboost or 3xc, re-posting null may *deactivate* it — the my-team POST sets
-  chip state rather than merging.
-- `manager.py` + `fpl_client.py:521` zip id-sorted in/out lists into transfer
-  pairs. Position multisets always match, but individual pairs can be
-  DEF-out/MID-in. If FPL validates per-pair, multi-transfer submissions fail.
-
-Record a real authenticated `/my-team/` response as a test fixture. The current
-tests construct the *assumed* shape, so they prove the code agrees with itself,
-not with FPL.
-
-Then merge `rebuild/xp-model` to `main` and enable Weekly Run. Nothing is live
-until that merge.
-
-### 2. Duplicate weekly runs
-
-`deadline_scheduler.py:31` writes its dedup marker to `/tmp` on an ephemeral
-Actions runner, so it never persists. Combined with the independent cron in
-`weekly_run.yml`, the weekly run can fire up to five times per deadline. A
-defensive `limit - made` guard exists in `manager.py`, but the root cause is
-unfixed. Consider an idempotence check via `get_my_transfers` (exists, unused).
-
-### 3. Telegram reporting and the scheduled judgment layer
-
-Never built, and the owner's main outstanding ask. Two layers: the
-deterministic optimiser on the Actions cron, plus a scheduled Claude routine
-before the deadline that reads press-conference news, sanity-checks the
-proposed moves, and flags or approves. Weekly review should cover rank delta,
-xP vs actual, captain hit rate, and which decisions cost points.
-
-Newly available inputs that beat the deleted scrapers: `scout_news_link`
-(official club injury articles, populated for ~26 players) and `scout_risks`,
-both on the bootstrap element.
-
-### 4. 2026/27 rule changes
-
-**Rebalanced BPS — the one that costs points.** FPL changed BPS weights to
-favour full-backs, goalkeepers and attackers. `xp_model.py` interpolates a
-curve (`BONUS_CURVE_BPS` / `BONUS_CURVE_PTS`) fitted to 673 player-seasons from
-2024-25 and 2025-26, both old-weights. Stale twice over: the mapping
-over-predicts bonus for exactly the buffed positions, and the `bps90` fed into
-it also comes from old-weight priors. It is also position-agnostic while the
-change is positional. BPS weights are not published in `game_config`, so
-recalibration is the only route — **refit around GW8-10** and treat bonus as
-the least trustworthy term until then.
-
-**Daily midnight price changes.** Audit the cron times so the weekly run fires
-*after* the daily price change, not before. Also `price_change_percent` is on
-every element (a **string**, "0" pre-season) and tracks proximity to a rise or
-fall. The optimiser ignores price movement entirely — it neither buys ahead of
-rises nor avoids falls, and team value compounds over a season.
-
-Real-time ranks and provisional bonus matter only for reporting: a live rank
-tracker is feasible via `event/{id}/live/`.
-
-### 5. Minutes model
-
-The known all-players correlation gap. The model assigns non-zero xP to players
-who never appear. `p_sub` in `xp_model.py` also uses the pre-normalisation
-start rate, so a demoted backup keeper still carries ~0.25 sub-appearance
-probability.
-
-### 6. Smaller model gaps
-
-- Team strength has no shrinkage toward 1.0 and uses raw goals, not xG. One
-  extreme season propagates into every clean-sheet term.
-- Saves use `E[S]/3` rather than `E[floor(S/3)]`, overpricing keepers.
-- Missing scoring terms: red cards, own goals, penalty saves.
-- `backtest.py` uses season-end team and position per player, so mid-season
-  transfers are misattributed in early gameweeks.
-
-### 7. README is stale
-
-Eight references to deleted modules and the scraper architecture.
-
-## Strategic note for the owner
-
-At GW1 the current squad's XI scores **112.4 xP** over five gameweeks; an
-unconstrained rebuild scores **133.8**. A ~21 xP gap is large. Wildcard unlocks
-at GW2 — worth considering early rather than banking it.
-
-Also unresolved: the optimiser maximises expected points, which is the right
-objective for total score and the wrong one for **rank**. It has no concept of
-template risk — it will happily leave a 70%-owned premium out of the squad,
-which is correct for points and dangerous for league position. Worth deciding
-whether to add an ownership term.
+  stop_event, status_for_entry, played_by_entry, is_pending}`. **There is no
+  `event` key** — the old code read one, so played chips were never detected.
+  `/entry/{id}/history/` really does use `{name, event}`; both are handled.
+- Before the first deadline, `transfers` reports
+  `{"status": "unlimited", "limit": null, "made": 0}`.
+- **Transfer pairs must match by position.** FPL validates each pair and rejects
+  the entire POST with `transfer_element_type_mismatch`. An id-sorted zip had 8
+  of 12 pairs refused on a real submission.
 
 ## Running locally without breaking CI
 

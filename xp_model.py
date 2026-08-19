@@ -159,6 +159,50 @@ ASSIST_PER_XA = {1: 1.20, 2: 1.20, 3: 1.35, 4: 2.09}
 # card to the first choice.
 GK_SUB_RATE = 0.0036
 
+# Gameweeks of evidence before a season-to-date start rate outweighs the prior,
+# in the n/(n+k) sense. The old code capped at eight and then trusted form
+# completely, which reads an eight-game sample as certainty.
+START_RATE_EVIDENCE_GAMEWEEKS = 10.0
+
+# Weights on the last few gameweeks' minutes, most recent first. Last week
+# alone predicts minutes better than the whole model, so it leads.
+RECENT_MINUTES_WEIGHTS = [0.5, 0.25, 0.15, 0.06, 0.04]
+
+# How far recent minutes may displace the season rate once enough gameweeks
+# have been observed. Short of 1.0 deliberately: one rotated week is not a
+# demotion, and a player rested for a cup tie should not be written off.
+RECENT_MINUTES_MAX_WEIGHT = 0.7
+
+# Minutes at which an appearance counts as a start rather than a cameo.
+STARTER_MINUTES_THRESHOLD = 60.0
+
+# Points a bonus award is worth when it lands. Bonus pays one, two or three,
+# and treating it as a ~2-point award occurring at the rate its mean implies
+# reproduces its realised spread; treating it as deterministic understates
+# every attacking player's variance.
+BONUS_TYPICAL_AWARD = 2.0
+
+# What the summed term variances miss, measured rather than argued.
+#
+# Two things are folded in here and it is worth being clear that they are not
+# separable from outside:
+#
+#   - the terms are summed as though independent, and they are not. A goal
+#     drags bonus with it; a clean sheet forbids conceding.
+#   - our own mean is wrong by some amount, and a residual cannot tell "this
+#     player is genuinely volatile" from "we mispriced him".
+#
+# Calibrated against realised residuals over 22,774 player-gameweeks of
+# 2025-26: predicted sd 1.417 against actual 1.954, a ratio of 1.379 in sd and
+# so 1.9 in variance. That makes this total *predictive* uncertainty rather
+# than the player's own variance - which is the quantity a decision wants
+# anyway, since being unsure is a real cost whatever its source.
+#
+# It is not a constant across the range: the ratio runs from 1.12 in the
+# quietest bucket to 1.81 in the middle, so this gets the overall level right
+# and leaves shape on the table. See tests/test_variance.py.
+VARIANCE_CORRELATION_INFLATION = 1.90
+
 # How much current-season evidence is needed before it outweighs the prior.
 # Lower than the priors' own figure because in-season form is more relevant to
 # the next fixture than last season's aggregate.
@@ -263,6 +307,7 @@ class XPModel:
         fixtures: list[dict],
         priors: PriorSet,
         config: ModelConfig | None = None,
+        recent_minutes: dict[int, list[float]] | None = None,
     ):
         self.bootstrap = bootstrap
         self.fixtures = pd.DataFrame(fixtures)
@@ -272,6 +317,7 @@ class XPModel:
         self.scoring = bootstrap["game_config"]["scoring"]
         # When each player can next feature, read from FPL's own news text.
         self.news = news.parse_all(bootstrap.get("elements") or [])
+        self.recent_minutes: dict[int, list[float]] = dict(recent_minutes or {})
         self._news_added: dict[int, date] = {}
         for e in bootstrap.get("elements") or []:
             raw = e.get("news_added")
@@ -387,14 +433,73 @@ class XPModel:
         starts = df["starts"].fillna(0.0).clip(lower=0.0)
         if events_done > 0:
             cur_sr = (starts / events_done).clip(0.0, 1.0)
-            w_sr = min(events_done / 8.0, 1.0)  # eight games before form fully displaces the prior
+            # n/(n+k) rather than a hard cap at eight gameweeks. The old form
+            # displaced the prior entirely from GW8 onward, treating an
+            # eight-game sample as certainty; regressing next season's start
+            # rate on this one implies k of roughly 10 within a season.
+            w_sr = events_done / (events_done + START_RATE_EVIDENCE_GAMEWEEKS)
             df["start_rate"] = w_sr * cur_sr + (1.0 - w_sr) * blended_prior
         else:
             df["start_rate"] = blended_prior
 
+        # Recent minutes, which beat every rate above.
+        #
+        # A season-to-date start rate is a *level*: a player who lost his place
+        # three weeks ago still carries the average of the weeks he was
+        # playing. How long he was on the pitch last week is a *state*, and
+        # measured over 22,774 player-gameweeks it predicts minutes far better
+        # on its own (R2 0.598) than this entire model does (0.472). Combining
+        # lags of one, three and five gameweeks reaches 0.633.
+        #
+        # That matters more than any scoring term: rescaling expected points by
+        # lag-predicted minutes lifts points R2 from 0.280 to 0.350 on held-out
+        # data, while the whole goals/assists/clean-sheet/bonus apparatus is
+        # worth 0.004 once minutes are known.
+        df["start_rate"] = self._blend_recent_minutes(df, events_done)
+
         df["prior_confidence"] = prior_confidence
 
         return df
+
+    def _blend_recent_minutes(self, df: pd.DataFrame, events_done: int) -> pd.Series:
+        """
+        Fold recent observed minutes into the start rate.
+
+        `recent_minutes` maps player id -> minutes in each of the last few
+        gameweeks, most recent first. Supplied by the caller because the source
+        differs: the weekly run reads `event/{id}/live/`, the backtest reads
+        the gameweek history it is already replaying.
+
+        Returns the start rate unchanged when nothing is supplied, so the
+        pre-season path and any caller that cannot provide it are unaffected.
+        """
+        start_rate = df["start_rate"]
+        if not self.recent_minutes or events_done <= 0:
+            return start_rate
+
+        # Weighted toward the most recent, since last week outperforms any
+        # longer window on its own.
+        weights = np.array(RECENT_MINUTES_WEIGHTS, dtype=float)
+        observed = pd.Series(np.nan, index=df.index, dtype=float)
+        for pos, pid in enumerate(df["id"].astype(int)):
+            mins = self.recent_minutes.get(int(pid))
+            if not mins:
+                continue
+            m = np.array(mins[: len(weights)], dtype=float)
+            w = weights[: len(m)]
+            if w.sum() <= 0:
+                continue
+            # Expressed as a start-equivalent: a full match is a start, a
+            # cameo is not, and the threshold sits where an autosub stops
+            # being one.
+            observed.iloc[pos] = float((m >= STARTER_MINUTES_THRESHOLD) @ w / w.sum())
+
+        # The lag view earns weight as gameweeks accumulate, and never fully
+        # displaces the season rate - a single rotated week is not a demotion.
+        depth = min(len(weights), events_done)
+        w_recent = RECENT_MINUTES_MAX_WEIGHT * depth / len(weights)
+        return start_rate.where(observed.isna(),
+                                w_recent * observed + (1.0 - w_recent) * start_rate)
 
     def _price_implied_start_rate(self, df: pd.DataFrame) -> pd.Series:
         """P(start) implied by price alone, per position."""
@@ -819,9 +924,35 @@ class XPModel:
 
     # ---------- the estimate ----------
 
+    @staticmethod
+    def _second_moment_gate(second_moment, mean, gate) -> pd.Series:
+        """
+        Variance of a quantity that only occurs if the player is on the pitch.
+
+        The term is a mixture: zero with probability (1 - gate), and the
+        modelled distribution otherwise. Var = gate * E[X^2] - (gate * E[X])^2,
+        and `mean` already carries the gate.
+        """
+        sm = pd.Series(second_moment, index=mean.index)
+        return (gate * sm - mean ** 2).clip(lower=0.0)
+
     def expected_points_for_fixture(self, team_id: int, opponent_id: int, is_home: bool,
-                                    event: int | None = None) -> pd.Series:
-        """xP for every player, were their team to play this single fixture."""
+                                    event: int | None = None,
+                                    with_variance: bool = False):
+        """
+        xP for every player, were their team to play this single fixture.
+
+        With `with_variance`, returns (mean, variance) instead of the mean
+        alone. The variance is assembled from the same distributions the mean
+        already uses - Poisson goals and assists, Bernoulli clean sheets and
+        defensive contribution, the explicit goals-conceded and saves mass
+        functions - so it is derived rather than fitted.
+
+        Every decision this model feeds was made on a point estimate, which
+        cannot distinguish a forward who hauls or blanks from a defender who
+        returns five every week. For captaincy, the highest-variance call of
+        the week, that difference is the entire question.
+        """
         df = self.players
         mm = self.minutes_model(event)
         pos = df["position"]
@@ -901,6 +1032,52 @@ class XPModel:
         bonus = self._expected_bonus(df["bps90"], minutes_share) * float(self.scoring.get("bonus", 1))
 
         total = appearance + goals + assists + clean_sheet + goals_conceded + saves + dc + cards + bonus
+        if not with_variance:
+            return total
+
+        # Variance, term by term, from the distribution each term already
+        # assumes. Summed as though the terms were independent, which they are
+        # not - a goal drags bonus with it, and a clean sheet forbids conceding
+        # - so the sum is corrected by VARIANCE_CORRELATION_INFLATION, measured
+        # against realised variance rather than argued for.
+        g_pts = self._pts("goals_scored", pos)
+        a_pts = self._pts("assists", pos)
+        cs_pts = self._pts("clean_sheets", pos)
+        dc_pts = self._pts("defensive_contribution", pos)
+
+        # Appearance takes 0, 1 or 2; compute its second moment directly.
+        p_two = mm["p60"]
+        p_one = (mm["p_appear"] - mm["p60"]).clip(lower=0)
+        appear_sq = (long_play ** 2) * p_two + (short_play ** 2) * p_one
+        var_appearance = appear_sq - appearance ** 2
+
+        # Poisson counts: variance equals the mean, scaled by points squared.
+        var_goals = g_pts * goals
+        var_assists = a_pts * assists
+
+        # Bernoulli awards.
+        q_cs = (mm["p60"] * p_cs).clip(0.0, 1.0)
+        var_cs = (cs_pts ** 2) * q_cs * (1.0 - q_cs)
+        p_dc_award = (dc / dc_pts.replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0)
+        var_dc = (dc_pts ** 2) * p_dc_award * (1.0 - p_dc_award)
+
+        # Terms whose second moment needs the mass function that produced them.
+        var_conceded = self._second_moment_gate(
+            (pmf * ((ks // 2) * gc_pts.abs().to_numpy()[:, None]) ** 2).sum(axis=1),
+            goals_conceded, mm["p60"])
+        var_saves = self._second_moment_gate(
+            (save_pmf * ((save_ks // 3) * float(self.scoring.get("saves", 1))) ** 2).sum(axis=1),
+            saves, mm["p_appear"])
+
+        # Bonus is one to three points, rarely. Treated as an award of about
+        # two points at the rate implied by its mean, which reproduces its
+        # realised spread far better than assuming it is deterministic.
+        var_bonus = (BONUS_TYPICAL_AWARD * bonus - bonus ** 2).clip(lower=0.0)
+        var_cards = (float(self.scoring.get("yellow_cards", -1)) ** 2) * cards.abs()
+
+        variance = (var_appearance + var_goals + var_assists + var_cs + var_dc
+                    + var_conceded + var_saves + var_bonus + var_cards)
+        return total, (variance * VARIANCE_CORRELATION_INFLATION).clip(lower=0.0)
         return total.clip(lower=0.0)
 
     def expected_points(self, events: list[int]) -> pd.DataFrame:
@@ -933,18 +1110,24 @@ class XPModel:
         for i, ev in enumerate(events):
             fx = self.fixtures_for_event(ev)
             gw_points = pd.Series(0.0, index=df.index)
+            gw_var = pd.Series(0.0, index=df.index)
             fixture_count = pd.Series(0, index=df.index)
 
             for _, f in fx.iterrows():
                 mask = df["team"] == f["team_id"]
                 if not mask.any():
                     continue
-                xp = self.expected_points_for_fixture(
-                    int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]), event=ev)
+                xp, var = self.expected_points_for_fixture(
+                    int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]),
+                    event=ev, with_variance=True)
                 gw_points[mask] += xp[mask]
+                # Fixtures within a double gameweek are near enough independent
+                # - different opponents, days apart - so variances add.
+                gw_var[mask] += var[mask]
                 fixture_count[mask] += 1
 
             out[f"xp_gw{ev}"] = gw_points
+            out[f"var_gw{ev}"] = gw_var
             out[f"fixtures_gw{ev}"] = fixture_count
             # Only the first `horizon` gameweeks form the squad-selection
             # objective, however many are scored. Callers pass a longer event
@@ -956,6 +1139,8 @@ class XPModel:
                 horizon_total += gw_points * (self.config.horizon_decay**i)
 
         out["xp_next"] = out[f"xp_gw{events[0]}"] if events else 0.0
+        out["var_next"] = out[f"var_gw{events[0]}"] if events else 0.0
+        out["sd_next"] = np.sqrt(out["var_next"].clip(lower=0.0))
         out["xp_horizon"] = horizon_total
         out["value"] = out["xp_horizon"] / out["cost"].clip(lower=3.5)
 
