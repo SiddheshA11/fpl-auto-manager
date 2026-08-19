@@ -41,14 +41,58 @@ Acting on it — folding recent minutes into the start rate — moved R² from
 
 ## Open work
 
-### 1. Multi-gameweek transfer sequencing — the largest remaining gap
+### 1. Multi-gameweek transfer sequencing — built, measured, NOT shipped
 
-Transfers are one-step greedy: this week's move optimised against a 5-gameweek
-horizon, with no plan for a *sequence*. Bank a transfer now to make a double
-move next week, route toward a wildcard, take a hit early to catch a fixture
-swing — none of it is modelled. This is what FPL Copilot claims as its
-advantage, and chips already work this way (`chips.solve_assignment`); transfers
-do not.
+Both formulations exist on `feat/transfer-sequencing` and work:
+`sequence.plan_by_enumeration` (beam search over transfer-count schedules,
+~4s) and `sequence.plan_jointly` (one MILP over the horizon, ~5s). They
+demonstrably bank — over 2025-26 they hold 2+ free transfers in 17 and 14
+gameweeks against greedy's 6.
+
+**They are not wired into `manager.py`, because one season cannot measure
+them.** See "the noise floor" below. Do not merge on the strength of the
++56/+78 full-season numbers; that is noise.
+
+To actually settle it, get more seasons. `fetch_data.py` pulls from
+vaastav/Fantasy-Premier-League, which has data back to 2016-17, and
+`HISTORY_SEASONS = 3` is the only thing limiting it — `--seasons` already
+overrides. Six usable seasons would cut the noise floor by roughly √2.4.
+That fetch is the prerequisite for measuring *any* optimiser change, not just
+this one.
+
+### 1a. The noise floor — read this before measuring any optimiser change
+
+`simulate.py` replays a season making real decisions and reports a points
+total. It is the right tool and it works. But a single season is chaotic:
+holding the strategy fixed at greedy and varying **only the horizon**, which
+is a minor change, moves the season total across a 141-point range.
+
+```
+  greedy h=1   1989   (4 hits taken — a myopic objective churns)
+  greedy h=3   2114
+  greedy h=4   2154
+  greedy h=5   2062   <- production
+  greedy h=6   2084
+  greedy h=7   2013
+```
+
+SD across h=3..7 is about 53 points. Any optimiser effect smaller than that
+is unmeasurable with one season, and both sequencers land inside it.
+
+Two study designs were tried and they contradict each other, which is the
+same fact seen twice:
+
+```
+  8-GW windows, 8 independent      enumerate -32/season   joint -57/season
+  staggered starts, all to GW38    enumerate +35/season   joint +36/season
+```
+
+The windows truncate a 5-gameweek plan's payoff; the staggered runs are nested
+subsets of each other and so are not five samples. Neither is wrong. There is
+just not enough data.
+
+Note also that h=4 beats production's h=5 by 92 points here. **Do not retune
+`HORIZON` on that** — it is the same noise.
 
 ### 2. Rank-aware objective
 
@@ -114,6 +158,13 @@ to price a tail.
 - **Tests that exercise a helper do not prove the helper is called.** Three
   separate fixes could be deleted from production with the whole suite green.
   Prefer an end-to-end test that inspects what the client was actually handed.
+  A fourth was found this way: `recommend.py` passed no `ownership_weight`, so
+  the tool used to preview a plan before a deadline optimised at 0.0 while the
+  weekly run used +0.20 — different squad, no Haaland, 0.56 xP short.
+  `deadline_check.py` had the identical bug and carries a comment about it.
+  Now fixed, with a test that records the optimiser's constructor kwargs
+  through a full `recommend.main()` run.
+- **A season total is not a measurement.** See "the noise floor" above.
 
 ## Verified API facts
 
