@@ -39,6 +39,76 @@ minutes should justify itself against that number.
 Acting on it — folding recent minutes into the start rate — moved R² from
 0.269 to 0.319, the largest single improvement made.
 
+## What to build next, in order
+
+Ranked against the two measured facts that should govern everything: minutes
+dominate accuracy, and the decision side has a noise floor that most changes
+cannot clear. Anything not on this list should have to argue against these.
+
+### Priority 1 — minutes, because the headroom is still enormous
+
+The decomposition says our model scores R² 0.271 and *perfect minutes scaling
+the same xP* scores 0.440. Our minutes model is at R² 0.609 after the
+recent-minutes work. So closing the remaining minutes gap is worth up to
+**+0.169 R²** — against 0.004 for the entire goals/assists/clean-sheet/bonus
+apparatus. Nothing else on this page is in the same units.
+
+Three concrete, unexercised leads, cheapest first:
+
+1. **Yellow-card suspension risk — not modelled at all.** Five yellows is a
+   ban, and `yellow_cards` is already aggregated in `priors.py` as a rate for
+   the -1 point. Nobody converts a card count into a probability of missing
+   the next match, which is a pure minutes effect and fully deterministic
+   from data already on disk. Cheapest thing on this list by a distance.
+2. **Manager change resets a start rate.** A new manager makes the previous
+   twenty gameweeks of team selection much weaker evidence. Currently the
+   start rate shrinks on a gameweek scale that knows nothing about this.
+3. **Predicted lineups.** The single largest source, and what the paid
+   services actually sell. Not in the FPL API, so it means an external feed
+   and real fragility. Measure 1 and 2 before deciding this is worth the
+   dependency.
+
+Note what has already been *measured as worthless* and should not be retried:
+rotation-from-congestion, team-effect-from-injuries.
+
+### Priority 2 — the rank-aware objective, now unblocked
+
+Different axis entirely: this is about winning a 20-person league, not about
+accuracy, so the R² yardstick does not apply and neither does the noise floor
+on total points.
+
+`league_analyzer.py` computes rival ownership **and rival captain rates**, and
+is imported by no file in the repo — verified again this session. `sd_next`
+is computed on every production run and consumed by nothing. Those two plus
+the existing tilt are the whole of a rank-aware captaincy rule, and captaincy
+is the highest-leverage call of the week.
+
+The tilt currently runs on `selected_by_percent` — the 11-million-player
+template — when the field is 19 specific people. That proxy is known to be
+wrong in a specific direction: squad ownership is not captaincy ownership.
+
+Was blocked because `/entry/{id}/event/{gw}/picks/` returns nothing before a
+gameweek completes. **After GW1 it is unblocked.**
+
+### Priority 3 — measure the hand-picked optimiser constants
+
+`simulate.py` now makes this possible for the first time. `FREE_TRANSFER_VALUE
+= 0.3`, `DEFAULT_BENCH_WEIGHT = 0.15`, `HORIZON = 5` and `max_hits = 2` were
+all set by argument, never measured.
+
+Expect the answer to be "all inert". The horizon sweep already shows h=3 to
+h=7 are indistinguishable, and that is the knob with the most obvious
+mechanism. Run one batch, record the nulls, and stop touching them — a
+measured null is worth more than a plausible story, and it closes the question
+permanently.
+
+**Use a control every time.** See the noise floor below.
+
+### Priority 4 and below
+
+Team value and price changes (now that the budget binds at +0.20), and the
+bonus-curve refit. Both are small; the bonus curve is inside the 0.004.
+
 ## Open work
 
 ### 1. Multi-gameweek transfer sequencing — built, measured, DEAD
