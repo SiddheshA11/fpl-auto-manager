@@ -284,6 +284,20 @@ def _plan_transfers(strategy, opt, pool, squad, bank, free_transfers, selling,
             squad, bank=bank, free_transfers=free_transfers, selling_prices=selling,
             max_hits=max_hits, free_transfer_value=ftv, horizon_weight=horizon_weight,
         )
+    if strategy == "enumerate":
+        import sequence
+        return sequence.plan_by_enumeration(
+            pool, squad, bank, free_transfers, selling, events,
+            decay=X.ModelConfig().horizon_decay, max_hits=max_hits,
+            ownership_weight=0.0,
+        ).solution
+    if strategy == "joint":
+        import sequence
+        return sequence.plan_jointly(
+            pool, squad, bank, free_transfers, selling, events,
+            decay=X.ModelConfig().horizon_decay, max_hits=max_hits,
+            ownership_weight=0.0,
+        ).solution
     raise SystemExit(f"unknown strategy {strategy!r}")
 
 
