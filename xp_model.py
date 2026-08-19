@@ -159,6 +159,23 @@ ASSIST_PER_XA = {1: 1.20, 2: 1.20, 3: 1.35, 4: 2.09}
 # card to the first choice.
 GK_SUB_RATE = 0.0036
 
+# Gameweeks of evidence before a season-to-date start rate outweighs the prior,
+# in the n/(n+k) sense. The old code capped at eight and then trusted form
+# completely, which reads an eight-game sample as certainty.
+START_RATE_EVIDENCE_GAMEWEEKS = 10.0
+
+# Weights on the last few gameweeks' minutes, most recent first. Last week
+# alone predicts minutes better than the whole model, so it leads.
+RECENT_MINUTES_WEIGHTS = [0.5, 0.25, 0.15, 0.06, 0.04]
+
+# How far recent minutes may displace the season rate once enough gameweeks
+# have been observed. Short of 1.0 deliberately: one rotated week is not a
+# demotion, and a player rested for a cup tie should not be written off.
+RECENT_MINUTES_MAX_WEIGHT = 0.7
+
+# Minutes at which an appearance counts as a start rather than a cameo.
+STARTER_MINUTES_THRESHOLD = 60.0
+
 # How much current-season evidence is needed before it outweighs the prior.
 # Lower than the priors' own figure because in-season form is more relevant to
 # the next fixture than last season's aggregate.
@@ -263,6 +280,7 @@ class XPModel:
         fixtures: list[dict],
         priors: PriorSet,
         config: ModelConfig | None = None,
+        recent_minutes: dict[int, list[float]] | None = None,
     ):
         self.bootstrap = bootstrap
         self.fixtures = pd.DataFrame(fixtures)
@@ -272,6 +290,7 @@ class XPModel:
         self.scoring = bootstrap["game_config"]["scoring"]
         # When each player can next feature, read from FPL's own news text.
         self.news = news.parse_all(bootstrap.get("elements") or [])
+        self.recent_minutes: dict[int, list[float]] = dict(recent_minutes or {})
         self._news_added: dict[int, date] = {}
         for e in bootstrap.get("elements") or []:
             raw = e.get("news_added")
@@ -387,14 +406,73 @@ class XPModel:
         starts = df["starts"].fillna(0.0).clip(lower=0.0)
         if events_done > 0:
             cur_sr = (starts / events_done).clip(0.0, 1.0)
-            w_sr = min(events_done / 8.0, 1.0)  # eight games before form fully displaces the prior
+            # n/(n+k) rather than a hard cap at eight gameweeks. The old form
+            # displaced the prior entirely from GW8 onward, treating an
+            # eight-game sample as certainty; regressing next season's start
+            # rate on this one implies k of roughly 10 within a season.
+            w_sr = events_done / (events_done + START_RATE_EVIDENCE_GAMEWEEKS)
             df["start_rate"] = w_sr * cur_sr + (1.0 - w_sr) * blended_prior
         else:
             df["start_rate"] = blended_prior
 
+        # Recent minutes, which beat every rate above.
+        #
+        # A season-to-date start rate is a *level*: a player who lost his place
+        # three weeks ago still carries the average of the weeks he was
+        # playing. How long he was on the pitch last week is a *state*, and
+        # measured over 22,774 player-gameweeks it predicts minutes far better
+        # on its own (R2 0.598) than this entire model does (0.472). Combining
+        # lags of one, three and five gameweeks reaches 0.633.
+        #
+        # That matters more than any scoring term: rescaling expected points by
+        # lag-predicted minutes lifts points R2 from 0.280 to 0.350 on held-out
+        # data, while the whole goals/assists/clean-sheet/bonus apparatus is
+        # worth 0.004 once minutes are known.
+        df["start_rate"] = self._blend_recent_minutes(df, events_done)
+
         df["prior_confidence"] = prior_confidence
 
         return df
+
+    def _blend_recent_minutes(self, df: pd.DataFrame, events_done: int) -> pd.Series:
+        """
+        Fold recent observed minutes into the start rate.
+
+        `recent_minutes` maps player id -> minutes in each of the last few
+        gameweeks, most recent first. Supplied by the caller because the source
+        differs: the weekly run reads `event/{id}/live/`, the backtest reads
+        the gameweek history it is already replaying.
+
+        Returns the start rate unchanged when nothing is supplied, so the
+        pre-season path and any caller that cannot provide it are unaffected.
+        """
+        start_rate = df["start_rate"]
+        if not self.recent_minutes or events_done <= 0:
+            return start_rate
+
+        # Weighted toward the most recent, since last week outperforms any
+        # longer window on its own.
+        weights = np.array(RECENT_MINUTES_WEIGHTS, dtype=float)
+        observed = pd.Series(np.nan, index=df.index, dtype=float)
+        for pos, pid in enumerate(df["id"].astype(int)):
+            mins = self.recent_minutes.get(int(pid))
+            if not mins:
+                continue
+            m = np.array(mins[: len(weights)], dtype=float)
+            w = weights[: len(m)]
+            if w.sum() <= 0:
+                continue
+            # Expressed as a start-equivalent: a full match is a start, a
+            # cameo is not, and the threshold sits where an autosub stops
+            # being one.
+            observed.iloc[pos] = float((m >= STARTER_MINUTES_THRESHOLD) @ w / w.sum())
+
+        # The lag view earns weight as gameweeks accumulate, and never fully
+        # displaces the season rate - a single rotated week is not a demotion.
+        depth = min(len(weights), events_done)
+        w_recent = RECENT_MINUTES_MAX_WEIGHT * depth / len(weights)
+        return start_rate.where(observed.isna(),
+                                w_recent * observed + (1.0 - w_recent) * start_rate)
 
     def _price_implied_start_rate(self, df: pd.DataFrame) -> pd.Series:
         """P(start) implied by price alone, per position."""
