@@ -145,3 +145,26 @@ def test_build_state_runs_on_every_fetched_season(season):
     state = backtest.build_state(gw, raw, teams, 10, {})
     assert len(state["elements"]) > 300
     assert all(e["now_cost"] > 0 for e in state["elements"])
+
+
+def test_the_in_progress_season_is_excluded_exactly_as_before(tmp_path, monkeypatch):
+    """
+    CI fetches the current season alongside the two before it, and before a
+    ball is kicked vaastav has nothing for it - so `fetch_data` creates the
+    directory and every file 404s. The old check excluded it because
+    merged_gw.csv was absent; the new one must exclude it for the same reason
+    and no other, or tightening this quietly changes which seasons the weekly
+    run builds its priors from.
+    """
+    monkeypatch.setattr(priors, "HISTORY_DIR", tmp_path)
+    _season(tmp_path / "2024-25")
+    _season(tmp_path / "2025-26")
+    (tmp_path / "2026-27").mkdir()                     # created, never populated
+    assert priors.available_seasons() == ["2024-25", "2025-26"]
+
+    # And a *partial* in-progress season, which the old check would have let
+    # through: files present but merged_gw.csv missing the column the prior
+    # build reads. Excluding it is the safe direction - including it raised
+    # KeyError mid-run.
+    _season(tmp_path / "2026-27", columns=("element", "GW", "total_points", "minutes"))
+    assert priors.available_seasons() == ["2024-25", "2025-26"]
