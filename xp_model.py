@@ -176,6 +176,33 @@ RECENT_MINUTES_MAX_WEIGHT = 0.7
 # Minutes at which an appearance counts as a start rather than a cameo.
 STARTER_MINUTES_THRESHOLD = 60.0
 
+# Points a bonus award is worth when it lands. Bonus pays one, two or three,
+# and treating it as a ~2-point award occurring at the rate its mean implies
+# reproduces its realised spread; treating it as deterministic understates
+# every attacking player's variance.
+BONUS_TYPICAL_AWARD = 2.0
+
+# What the summed term variances miss, measured rather than argued.
+#
+# Two things are folded in here and it is worth being clear that they are not
+# separable from outside:
+#
+#   - the terms are summed as though independent, and they are not. A goal
+#     drags bonus with it; a clean sheet forbids conceding.
+#   - our own mean is wrong by some amount, and a residual cannot tell "this
+#     player is genuinely volatile" from "we mispriced him".
+#
+# Calibrated against realised residuals over 22,774 player-gameweeks of
+# 2025-26: predicted sd 1.417 against actual 1.954, a ratio of 1.379 in sd and
+# so 1.9 in variance. That makes this total *predictive* uncertainty rather
+# than the player's own variance - which is the quantity a decision wants
+# anyway, since being unsure is a real cost whatever its source.
+#
+# It is not a constant across the range: the ratio runs from 1.12 in the
+# quietest bucket to 1.81 in the middle, so this gets the overall level right
+# and leaves shape on the table. See tests/test_variance.py.
+VARIANCE_CORRELATION_INFLATION = 1.90
+
 # How much current-season evidence is needed before it outweighs the prior.
 # Lower than the priors' own figure because in-season form is more relevant to
 # the next fixture than last season's aggregate.
@@ -897,9 +924,35 @@ class XPModel:
 
     # ---------- the estimate ----------
 
+    @staticmethod
+    def _second_moment_gate(second_moment, mean, gate) -> pd.Series:
+        """
+        Variance of a quantity that only occurs if the player is on the pitch.
+
+        The term is a mixture: zero with probability (1 - gate), and the
+        modelled distribution otherwise. Var = gate * E[X^2] - (gate * E[X])^2,
+        and `mean` already carries the gate.
+        """
+        sm = pd.Series(second_moment, index=mean.index)
+        return (gate * sm - mean ** 2).clip(lower=0.0)
+
     def expected_points_for_fixture(self, team_id: int, opponent_id: int, is_home: bool,
-                                    event: int | None = None) -> pd.Series:
-        """xP for every player, were their team to play this single fixture."""
+                                    event: int | None = None,
+                                    with_variance: bool = False):
+        """
+        xP for every player, were their team to play this single fixture.
+
+        With `with_variance`, returns (mean, variance) instead of the mean
+        alone. The variance is assembled from the same distributions the mean
+        already uses - Poisson goals and assists, Bernoulli clean sheets and
+        defensive contribution, the explicit goals-conceded and saves mass
+        functions - so it is derived rather than fitted.
+
+        Every decision this model feeds was made on a point estimate, which
+        cannot distinguish a forward who hauls or blanks from a defender who
+        returns five every week. For captaincy, the highest-variance call of
+        the week, that difference is the entire question.
+        """
         df = self.players
         mm = self.minutes_model(event)
         pos = df["position"]
@@ -979,6 +1032,52 @@ class XPModel:
         bonus = self._expected_bonus(df["bps90"], minutes_share) * float(self.scoring.get("bonus", 1))
 
         total = appearance + goals + assists + clean_sheet + goals_conceded + saves + dc + cards + bonus
+        if not with_variance:
+            return total
+
+        # Variance, term by term, from the distribution each term already
+        # assumes. Summed as though the terms were independent, which they are
+        # not - a goal drags bonus with it, and a clean sheet forbids conceding
+        # - so the sum is corrected by VARIANCE_CORRELATION_INFLATION, measured
+        # against realised variance rather than argued for.
+        g_pts = self._pts("goals_scored", pos)
+        a_pts = self._pts("assists", pos)
+        cs_pts = self._pts("clean_sheets", pos)
+        dc_pts = self._pts("defensive_contribution", pos)
+
+        # Appearance takes 0, 1 or 2; compute its second moment directly.
+        p_two = mm["p60"]
+        p_one = (mm["p_appear"] - mm["p60"]).clip(lower=0)
+        appear_sq = (long_play ** 2) * p_two + (short_play ** 2) * p_one
+        var_appearance = appear_sq - appearance ** 2
+
+        # Poisson counts: variance equals the mean, scaled by points squared.
+        var_goals = g_pts * goals
+        var_assists = a_pts * assists
+
+        # Bernoulli awards.
+        q_cs = (mm["p60"] * p_cs).clip(0.0, 1.0)
+        var_cs = (cs_pts ** 2) * q_cs * (1.0 - q_cs)
+        p_dc_award = (dc / dc_pts.replace(0, np.nan)).fillna(0.0).clip(0.0, 1.0)
+        var_dc = (dc_pts ** 2) * p_dc_award * (1.0 - p_dc_award)
+
+        # Terms whose second moment needs the mass function that produced them.
+        var_conceded = self._second_moment_gate(
+            (pmf * ((ks // 2) * gc_pts.abs().to_numpy()[:, None]) ** 2).sum(axis=1),
+            goals_conceded, mm["p60"])
+        var_saves = self._second_moment_gate(
+            (save_pmf * ((save_ks // 3) * float(self.scoring.get("saves", 1))) ** 2).sum(axis=1),
+            saves, mm["p_appear"])
+
+        # Bonus is one to three points, rarely. Treated as an award of about
+        # two points at the rate implied by its mean, which reproduces its
+        # realised spread far better than assuming it is deterministic.
+        var_bonus = (BONUS_TYPICAL_AWARD * bonus - bonus ** 2).clip(lower=0.0)
+        var_cards = (float(self.scoring.get("yellow_cards", -1)) ** 2) * cards.abs()
+
+        variance = (var_appearance + var_goals + var_assists + var_cs + var_dc
+                    + var_conceded + var_saves + var_bonus + var_cards)
+        return total, (variance * VARIANCE_CORRELATION_INFLATION).clip(lower=0.0)
         return total.clip(lower=0.0)
 
     def expected_points(self, events: list[int]) -> pd.DataFrame:
@@ -1011,18 +1110,24 @@ class XPModel:
         for i, ev in enumerate(events):
             fx = self.fixtures_for_event(ev)
             gw_points = pd.Series(0.0, index=df.index)
+            gw_var = pd.Series(0.0, index=df.index)
             fixture_count = pd.Series(0, index=df.index)
 
             for _, f in fx.iterrows():
                 mask = df["team"] == f["team_id"]
                 if not mask.any():
                     continue
-                xp = self.expected_points_for_fixture(
-                    int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]), event=ev)
+                xp, var = self.expected_points_for_fixture(
+                    int(f["team_id"]), int(f["opponent_id"]), bool(f["is_home"]),
+                    event=ev, with_variance=True)
                 gw_points[mask] += xp[mask]
+                # Fixtures within a double gameweek are near enough independent
+                # - different opponents, days apart - so variances add.
+                gw_var[mask] += var[mask]
                 fixture_count[mask] += 1
 
             out[f"xp_gw{ev}"] = gw_points
+            out[f"var_gw{ev}"] = gw_var
             out[f"fixtures_gw{ev}"] = fixture_count
             # Only the first `horizon` gameweeks form the squad-selection
             # objective, however many are scored. Callers pass a longer event
@@ -1034,6 +1139,8 @@ class XPModel:
                 horizon_total += gw_points * (self.config.horizon_decay**i)
 
         out["xp_next"] = out[f"xp_gw{events[0]}"] if events else 0.0
+        out["var_next"] = out[f"var_gw{events[0]}"] if events else 0.0
+        out["sd_next"] = np.sqrt(out["var_next"].clip(lower=0.0))
         out["xp_horizon"] = horizon_total
         out["value"] = out["xp_horizon"] / out["cost"].clip(lower=3.5)
 
