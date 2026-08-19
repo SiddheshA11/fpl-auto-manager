@@ -174,10 +174,10 @@ def simulate_season(
     budget: float = 100.0,
 ) -> SeasonResult:
     d = HISTORY_DIR / season
-    gw_df = pd.read_csv(d / "merged_gw.csv")
-    raw_df = pd.read_csv(d / "players_raw.csv")
-    teams_df = pd.read_csv(d / "teams.csv")
-    fixtures = pd.read_csv(d / "fixtures.csv").to_dict("records")
+    gw_df = priors.read_season_csv(d / "merged_gw.csv")
+    raw_df = priors.read_season_csv(d / "players_raw.csv")
+    teams_df = priors.read_season_csv(d / "teams.csv")
+    fixtures = priors.read_season_csv(d / "fixtures.csv").to_dict("records")
     game_config = _scoring_config()
 
     earlier = [s for s in priors.available_seasons() if s < season]

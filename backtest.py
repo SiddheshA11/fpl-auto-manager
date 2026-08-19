@@ -82,8 +82,21 @@ def build_state(
     Only rows from gameweeks strictly earlier than upto_gw are summed, so the
     model sees exactly what it would have seen at the deadline.
     """
+    # A stat that a season never recorded is not zero. `defensive_contribution`
+    # arrives in 2025-26 and `starts`/`expected_goals`/`expected_assists` in
+    # 2022-23, so summing CUMULATIVE blindly raised KeyError on every season but
+    # the newest - which is why this harness had only ever been run on one.
+    # Absent columns aggregate to NaN, the same rule priors.py follows: a player
+    # with 0.0 expected goals looks like a player who never threatens, and that
+    # is a different claim from "this season did not measure it".
+    present = [c for c in CUMULATIVE if c in gw_df.columns]
+    absent = [c for c in CUMULATIVE if c not in gw_df.columns]
+    if absent:
+        logger.info("season lacks %s; those totals will be NaN", ", ".join(absent))
     past = gw_df[gw_df["GW"] < upto_gw]
-    totals = past.groupby("element")[CUMULATIVE].sum() if len(past) else pd.DataFrame(columns=CUMULATIVE)
+    totals = past.groupby("element")[present].sum() if len(past) else pd.DataFrame(columns=present)
+    for c in absent:
+        totals[c] = np.nan
 
     # Price as at the gameweek being predicted, not season end. Deduplicated
     # because a double gameweek gives a player two rows with the same price.
@@ -93,7 +106,12 @@ def build_state(
     elements = []
     for _, p in raw_df.iterrows():
         eid = int(p["id"])
-        t = totals.loc[eid] if eid in totals.index else pd.Series(0.0, index=CUMULATIVE)
+        # A player with no rows yet has genuinely accumulated nothing, which is
+        # 0.0 - but only for stats the season actually records.
+        if eid in totals.index:
+            t = totals.loc[eid]
+        else:
+            t = pd.Series({c: (np.nan if c in absent else 0.0) for c in CUMULATIVE})
         now_cost = float(price.get(eid, p["now_cost"])) if price is not None else float(p["now_cost"])
         elements.append({
             "id": eid,
@@ -121,10 +139,10 @@ def build_state(
 
 def run_backtest(season: str, start_gw: int, end_gw: int, horizon: int = 1) -> pd.DataFrame:
     season_dir = HISTORY_DIR / season
-    gw_df = pd.read_csv(season_dir / "merged_gw.csv")
-    raw_df = pd.read_csv(season_dir / "players_raw.csv")
-    teams_df = pd.read_csv(season_dir / "teams.csv")
-    fixtures = pd.read_csv(season_dir / "fixtures.csv").to_dict("records")
+    gw_df = priors.read_season_csv(season_dir / "merged_gw.csv")
+    raw_df = priors.read_season_csv(season_dir / "players_raw.csv")
+    teams_df = priors.read_season_csv(season_dir / "teams.csv")
+    fixtures = priors.read_season_csv(season_dir / "fixtures.csv").to_dict("records")
     game_config = _scoring_config()
 
     # Strictly earlier seasons only. Including the season under test would let

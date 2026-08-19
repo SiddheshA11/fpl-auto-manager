@@ -32,6 +32,23 @@ import pandas as pd
 
 logger = logging.getLogger("fpl_auto.priors")
 
+
+def read_season_csv(path, **kwargs) -> pd.DataFrame:
+    """
+    Read a season CSV, tolerating the older files' encoding.
+
+    vaastav's dataset switched to UTF-8 partway through: 2016-17 to 2018-19
+    ship `merged_gw.csv` in latin-1, and pandas raises on the first accented
+    name rather than reading it as mojibake. Falling back keeps a decade of
+    history usable; without it, adding those seasons to the priors breaks every
+    caller that reads any season at all.
+    """
+    try:
+        return pd.read_csv(path, **kwargs)
+    except UnicodeDecodeError:
+        logger.debug("%s is not UTF-8; falling back to latin-1", path)
+        return pd.read_csv(path, encoding="latin-1", **kwargs)
+
 HISTORY_DIR = Path(__file__).parent / "data" / "history"
 
 # Gameweeks in a full Premier League season, used to tell a finished
@@ -175,11 +192,40 @@ def _season_dir(season: str) -> Path:
     return HISTORY_DIR / season
 
 
+# What a season must actually carry to be usable as a prior. Checked rather
+# than assumed because vaastav's dataset thins out going back: 2016-17 and
+# 2017-18 ship no teams.csv or fixtures.csv, 2018-19 no teams.csv, and 2019-20
+# has every file but no `team` column in merged_gw.csv - which
+# build_player_dc_team reads directly. Testing only for merged_gw.csv, as this
+# did, let all four through and turned "fetch more history" into a KeyError
+# deep inside the prior build.
+SEASON_REQUIRED_FILES = ("merged_gw.csv", "players_raw.csv", "teams.csv", "fixtures.csv")
+SEASON_REQUIRED_COLUMNS = ("team", "element", "GW", "total_points", "minutes")
+
+
+def season_is_usable(season: str) -> bool:
+    """Whether a season on disk carries everything the prior build reads."""
+    d = _season_dir(season)
+    if not all((d / f).exists() for f in SEASON_REQUIRED_FILES):
+        return False
+    try:
+        cols = set(read_season_csv(d / "merged_gw.csv", nrows=1).columns)
+    except (OSError, ValueError, pd.errors.ParserError):
+        return False
+    return set(SEASON_REQUIRED_COLUMNS) <= cols
+
+
 def available_seasons() -> list[str]:
-    """Seasons present on disk, oldest first."""
+    """Seasons present on disk and usable as priors, oldest first."""
     if not HISTORY_DIR.exists():
         return []
-    return sorted(d.name for d in HISTORY_DIR.iterdir() if d.is_dir() and (d / "merged_gw.csv").exists())
+    found = sorted(d.name for d in HISTORY_DIR.iterdir()
+                   if d.is_dir() and (d / "merged_gw.csv").exists())
+    usable = [s for s in found if season_is_usable(s)]
+    skipped = [s for s in found if s not in usable]
+    if skipped:
+        logger.info("skipping %s: incomplete for prior building", ", ".join(skipped))
+    return usable
 
 
 def season_is_complete(season: str) -> bool:
@@ -193,7 +239,7 @@ def season_is_complete(season: str) -> bool:
     season roughly twice and undoes the shrinkage the priors exist to apply.
     """
     try:
-        gw = pd.read_csv(_season_dir(season) / "merged_gw.csv", usecols=["GW"])
+        gw = read_season_csv(_season_dir(season) / "merged_gw.csv", usecols=["GW"])
     except (FileNotFoundError, pd.errors.EmptyDataError, ValueError):
         return False
     return int(gw["GW"].max() or 0) >= FULL_SEASON_GAMEWEEKS
@@ -214,9 +260,9 @@ def load_season(season: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame] 
     """
     sd = _season_dir(season)
     try:
-        gw = pd.read_csv(sd / "merged_gw.csv")
-        raw = pd.read_csv(sd / "players_raw.csv")
-        fixtures = pd.read_csv(sd / "fixtures.csv")
+        gw = read_season_csv(sd / "merged_gw.csv")
+        raw = read_season_csv(sd / "players_raw.csv")
+        fixtures = read_season_csv(sd / "fixtures.csv")
     except (FileNotFoundError, pd.errors.EmptyDataError) as e:
         logger.warning("season %s unavailable (%s); skipping", season, e)
         return None
@@ -533,7 +579,7 @@ def build_team_dc_factors(seasons: list[str] | None = None) -> dict[int, float]:
             # Seasons before 2025-26 predate the stat entirely.
             continue
         try:
-            teams = pd.read_csv(_season_dir(season) / "teams.csv")
+            teams = read_season_csv(_season_dir(season) / "teams.csv")
         except (FileNotFoundError, pd.errors.EmptyDataError):
             logger.warning("season %s missing teams.csv; skipped for DC factors", season)
             continue
@@ -604,7 +650,7 @@ def build_player_dc_team(seasons: list[str] | None = None) -> pd.Series:
             continue
         gw, raw, _fx = loaded
         try:
-            teams = pd.read_csv(_season_dir(season) / "teams.csv")
+            teams = read_season_csv(_season_dir(season) / "teams.csv")
         except (FileNotFoundError, pd.errors.EmptyDataError):
             continue
         if "name" not in teams.columns or "code" not in teams.columns:
@@ -664,7 +710,7 @@ def build_player_penalty_duty(seasons: list[str] | None = None) -> dict[int, boo
     out: dict[int, bool] = {}
     for season in sorted(seasons):        # oldest first, so recent seasons win
         try:
-            raw = pd.read_csv(_season_dir(season) / "players_raw.csv")
+            raw = read_season_csv(_season_dir(season) / "players_raw.csv")
         except (FileNotFoundError, pd.errors.EmptyDataError):
             continue
         if "penalties_order" not in raw.columns or "code" not in raw.columns:
@@ -731,7 +777,7 @@ def build_team_strength(
             continue
         _gw, _raw, fixtures = loaded
         try:
-            teams = pd.read_csv(_season_dir(season) / "teams.csv")
+            teams = read_season_csv(_season_dir(season) / "teams.csv")
         except FileNotFoundError:
             logger.warning("season %s missing teams.csv; skipping for team strength", season)
             continue
