@@ -14,6 +14,11 @@ from config import (
 
 logger = logging.getLogger("fpl_auto")
 
+# Every outbound call gets a timeout. A hung request in an unattended run holds
+# the job open until the workflow times out, past the deadline it was meant to
+# beat.
+REQUEST_TIMEOUT = 30
+
 
 class FPLClient:
     """Authenticated client for the Fantasy Premier League API."""
@@ -31,6 +36,8 @@ class FPLClient:
             "Origin": "https://fantasy.premierleague.com",
         })
         self.authenticated = False
+        # Set when a rotated token could not be persisted; the caller surfaces it.
+        self.rotation_failed = False
         self._bootstrap_cache = None
         self._fixtures_cache = None
 
@@ -83,25 +90,37 @@ class FPLClient:
                 "Content-Type": "application/x-www-form-urlencoded",
             }
             
-            resp = requests.post(PINGONE_TOKEN_URL, data=payload, headers=headers)
-            
+            resp = requests.post(PINGONE_TOKEN_URL, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+
             if resp.status_code == 200:
                 token_data = resp.json()
                 access_token = token_data.get("access_token")
                 new_refresh_token = token_data.get("refresh_token")
-                
+
                 if access_token:
                     # Set the Bearer token for all future requests
                     self.session.headers["Authorization"] = f"Bearer {access_token}"
                     logger.info("Successfully refreshed access token")
-                    
-                    # Save the new refresh token for next time (token rotation)
+
+                    # Persist the rotated token. This is the linchpin of running
+                    # unattended: PingOne invalidates the old refresh token the
+                    # moment it issues a new one, so if the new one is not
+                    # stored, this run works and every future run is locked out
+                    # until a human re-issues a token by hand. Failing to store
+                    # it is therefore critical, not a warning to be swallowed.
                     if new_refresh_token:
-                        self._update_github_secret("FPL_REFRESH_TOKEN", new_refresh_token)
-                    
+                        if not self._update_github_secret("FPL_REFRESH_TOKEN", new_refresh_token):
+                            logger.critical(
+                                "ROTATION FAILED: a new refresh token was issued but could not be "
+                                "saved, so the old one is now spent. This run will finish, but the "
+                                "next one cannot authenticate until FPL_REFRESH_TOKEN is set by hand. "
+                                "Check that GH_PAT is present and unexpired."
+                            )
+                            self.rotation_failed = True
+
                     # Verify it works
                     verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
-                    verify_resp = self.session.get(verify_url)
+                    verify_resp = self.session.get(verify_url, timeout=REQUEST_TIMEOUT)
                     
                     if verify_resp.status_code == 200:
                         self.authenticated = True
@@ -123,11 +142,16 @@ class FPLClient:
         
         Uses PyNaCl for encryption as required by GitHub API.
         """
-        github_token = os.environ.get("GITHUB_TOKEN")
+        # GH_PAT first, matching token_refresh.py and the workflow env blocks.
+        # Reading only GITHUB_TOKEN meant this never found a token in the
+        # weekly run: PingOne rotates the refresh token on use, so the run
+        # consumed the old one, failed to persist the new one, and every later
+        # refresh was dead - a warning, then silent auth failure the next week.
+        github_token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN")
         github_repo = os.environ.get("GITHUB_REPOSITORY")
         
         if not github_token or not github_repo:
-            logger.warning("GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
+            logger.error("GH_PAT/GITHUB_TOKEN or GITHUB_REPOSITORY not set, cannot rotate refresh token")
             return False
         
         try:
@@ -141,9 +165,9 @@ class FPLClient:
             }
             
             # Get public key for encryption
-            key_resp = requests.get(f"{api_base}/actions/secrets/public-key", headers=headers)
+            key_resp = requests.get(f"{api_base}/actions/secrets/public-key", headers=headers, timeout=REQUEST_TIMEOUT)
             if key_resp.status_code != 200:
-                logger.warning(f"Failed to get public key: {key_resp.status_code}")
+                logger.error(f"Failed to get GitHub public key: {key_resp.status_code} - {key_resp.text[:200]}")
                 return False
             
             key_data = key_resp.json()
@@ -161,21 +185,22 @@ class FPLClient:
                 json={
                     "encrypted_value": encrypted_b64,
                     "key_id": key_data["key_id"],
-                }
+                },
+                timeout=REQUEST_TIMEOUT,
             )
             
             if update_resp.status_code in (201, 204):
                 logger.info(f"Updated GitHub secret {secret_name} for token rotation")
                 return True
             else:
-                logger.warning(f"Failed to update secret: {update_resp.status_code}")
+                logger.error(f"Failed to update secret {secret_name}: {update_resp.status_code} - {update_resp.text[:200]}")
                 return False
                 
         except ImportError:
-            logger.warning("PyNaCl not installed, cannot rotate refresh token")
+            logger.error("PyNaCl not installed, cannot rotate refresh token")
             return False
         except Exception as e:
-            logger.warning(f"Failed to update GitHub secret: {e}")
+            logger.error(f"Failed to update GitHub secret {secret_name}: {e}")
             return False
 
 
@@ -431,20 +456,36 @@ class FPLClient:
             return team_data["transfers"].get("limit", 1)
         return 1
 
-    def get_chips_status(self) -> dict:
-        """Return which chips are available / played."""
-        team_data = self.get_my_team()
-        chips_played = {}
-        if team_data and "chips" in team_data:
-            for chip in team_data["chips"]:
-                # Use .get() since 'event' may not exist for unplayed chips
-                chip_name = chip.get("name")
-                chip_event = chip.get("event")
-                if chip_name and chip_event is not None:
-                    chips_played[chip_name] = chip_event
+    def get_chips_status(self, event: int | None = None) -> dict:
+        """
+        Which chips can be played in `event`.
 
-        all_chips = ["wildcard", "freehit", "bboost", "3xc"]
-        return {c: {"played": c in chips_played, "event": chips_played.get(c)} for c in all_chips}
+        Delegates to chips.available_chips because availability depends on the
+        gameweek: the game issues two of every chip, one for GW1-19 and one for
+        GW20-38. Treating a chip as spent forever once played - as this used to
+        - retires the second-half chip the moment the first-half one is used,
+        losing four chips over a season.
+        """
+        import chips as _chips
+
+        bootstrap = self.get_bootstrap()
+        team_data = self.get_my_team()
+
+        if event is None:
+            nxt = self.get_next_event()
+            event = int(nxt["id"]) if nxt else 1
+
+        available = _chips.available_chips(bootstrap, team_data, event)
+        played: dict[str, list[int]] = {}
+        for chip in (team_data or {}).get("chips", []) or []:
+            name, ev = chip.get("name"), chip.get("event")
+            if name and ev is not None:
+                played.setdefault(name, []).append(int(ev))
+
+        return {
+            name: {"available": name in available, "played_in": played.get(name, [])}
+            for name in sorted(_chips.CHIP_NAMES)
+        }
 
     # ──────────────── Team Modifications ────────────────
 
@@ -466,7 +507,8 @@ class FPLClient:
 
     def make_transfers(self, transfers_in: list[int], transfers_out: list[int],
                        prices_in: list[int], prices_out: list[int],
-                       wildcard: bool = False, free_hit: bool = False) -> dict | None:
+                       wildcard: bool = False, free_hit: bool = False,
+                       positions: dict[int, int] | None = None) -> dict | None:
         """
         Execute transfers.
 
@@ -479,6 +521,22 @@ class FPLClient:
         """
         if len(transfers_in) != len(transfers_out) or len(transfers_in) != len(prices_in) or len(transfers_out) != len(prices_out):
             raise ValueError("All transfer lists must be the same length.")
+
+        # FPL validates each pair individually and rejects the entire POST if
+        # any one of them swaps positions. Checking here turns a deadline-time
+        # 400 into a loud failure at the point the mistake was made. `positions`
+        # is optional only so existing callers keep working; supply it.
+        if positions:
+            bad = [
+                (i, o) for i, o in zip(transfers_in, transfers_out)
+                if positions.get(i) is not None and positions.get(o) is not None
+                and positions[i] != positions[o]
+            ]
+            if bad:
+                raise ValueError(
+                    f"{len(bad)} transfer pair(s) swap position, which FPL rejects "
+                    f"with transfer_element_type_mismatch: {bad}"
+                )
 
         next_event = self.get_next_event()
         if not next_event:

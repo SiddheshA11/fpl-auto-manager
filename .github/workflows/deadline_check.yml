@@ -24,6 +24,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # See weekly_run.yml: priors are gitignored, so they must be fetched
+      # before the model can score anything.
+      - name: Cache historical dataset
+        uses: actions/cache@v4
+        with:
+          path: data/history
+          key: fpl-history-${{ hashFiles('fetch_data.py') }}-v1
+
+      - name: Fetch priors
+        run: python fetch_data.py --skip-live
+
       - name: Run deadline check
         env:
           FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
@@ -31,6 +42,11 @@ jobs:
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
           FPL_COOKIE: ${{ secrets.FPL_COOKIE }}
           FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
+          # Required for token rotation. Without these this run consumes a
+          # refresh token and cannot persist the replacement, which breaks
+          # authentication for every run after it.
+          GH_PAT: ${{ secrets.GH_PAT }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python deadline_check.py
 
       - name: Upload logs
@@ -38,5 +54,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deadline-check-logs-${{ github.run_number }}
-          path: fpl_run_*.log
+          # deadline_check.py writes fpl_deadline_*.log; matching only
+          # fpl_run_*.log uploaded an empty artifact and left the one run whose
+          # output matters most with no record of what it changed.
+          path: |
+            fpl_deadline_*.log
+            fpl_run_*.log
           retention-days: 14

@@ -1,122 +1,181 @@
 """
-FPL Auto Manager - Deadline Check
-Runs close to the GW deadline to catch last-minute changes:
-  - Fresh online research for latest injury/team news
-  - Swap out any newly injured/suspended starters
-  - Update bench order based on latest news
-  - Final captain check
-Does NOT make transfers (those are done in the main Friday run).
-"""
-import sys
-import logging
-from datetime import datetime
+Pre-deadline safety check.
 
-from config import FPL_TEAM_ID
+Runs a couple of hours before the deadline, after the press conferences that
+usually produce late injury news. It does not make transfers - that decision
+was already taken and paid for earlier in the week. It only re-reads
+availability and repairs the lineup: pull anyone who has been flagged since,
+promote a fit replacement from the bench, and move the armband off a player
+who is no longer starting.
+
+Losing a captain to a late fitness doubt is the single most expensive
+unforced error in FPL, and it is entirely avoidable.
+"""
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from datetime import datetime, timezone
+
+import pandas as pd
+
+import priors
+import xp_model as X
+from config import FPL_TEAM_ID, OWNERSHIP_WEIGHT
 from fpl_client import FPLClient
-from player_scorer import PlayerScorer
-from news_researcher import NewsResearcher
-from web_research import WebResearcher
-from team_selector import TeamSelector
+from optimizer import SquadOptimizer, format_squad
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(f"fpl_run_deadline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
+        logging.FileHandler(f"fpl_deadline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"),
     ],
 )
 logger = logging.getLogger("fpl_auto")
 
+# A player this unlikely to feature should not be starting, whatever his
+# expected points look like on paper.
+BENCH_BELOW_AVAILABILITY = 0.5
 
-def run_deadline_check():
-    """Last-minute lineup adjustments before the GW deadline."""
+
+def run_deadline_check(dry_run: bool = False) -> dict | None:
     logger.info("=" * 60)
-    logger.info(f"FPL Deadline Check ({datetime.now().isoformat()})")
+    logger.info("pre-deadline check (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("=" * 60)
 
     client = FPLClient()
     if not client.login():
-        logger.critical("Auth failed. Aborting.")
-        sys.exit(1)
+        logger.critical("authentication failed; aborting")
+        return None
 
-    # ─── Fresh research to catch last-minute news ───
-    logger.info("Running fresh research for deadline check...")
-    bootstrap_data = client.get_bootstrap()
+    bootstrap = client.get_bootstrap()
+    fixtures_df = client.get_fixtures()
+    fixtures = fixtures_df.to_dict("records") if isinstance(fixtures_df, pd.DataFrame) else fixtures_df
 
-    # News research (injuries, press conferences)
-    news_researcher = NewsResearcher(bootstrap_data)
-    news_profiles = {}
-    try:
-        news_profiles = news_researcher.run_full_research()
-        flagged = news_researcher.get_flagged_players(threshold=0.7)
-        logger.info(f"Deadline research: {len(flagged)} flagged players.")
-    except Exception as e:
-        logger.warning(f"News research failed: {e}")
+    next_event = client.get_next_event()
+    if not next_event:
+        logger.warning("no upcoming gameweek")
+        return None
+    event_id = int(next_event["id"])
 
-    # Web research (lineups, latest team news)
-    web_researcher = WebResearcher(bootstrap_data)
-    web_research_data = {}
-    try:
-        web_research_data = web_researcher.run_full_research()
-    except Exception as e:
-        logger.warning(f"Web research failed: {e}")
-
-    # ─── Score with research data ───
-    scorer = PlayerScorer(client)
-    if news_profiles:
-        scorer.inject_news_research(news_profiles)
-    if web_research_data:
-        scorer.inject_web_research(web_research_data)
-
-    selector = TeamSelector(client, scorer)
-    scored_df = scorer.score_players()
-
-    # ─── Check for flagged players in starting XI ───
     my_team = client.get_my_team()
     if not my_team:
-        logger.error("Cannot fetch team.")
-        return
+        logger.critical("could not fetch squad; aborting")
+        return None
+    squad_ids = [int(p["element"]) for p in my_team["picks"]]
 
-    current_picks = my_team["picks"]
-    xi_ids = [p["element"] for p in current_picks if p["position"] <= 11]
+    team_codes = {t["code"]: t["name"] for t in bootstrap["teams"]}
+    prior_set = priors.build_priors(current_team_codes=team_codes)
+    try:
+        prior_set.validate()
+    except RuntimeError as e:
+        logger.critical("%s", e)
+        return None
+    model = X.XPModel(bootstrap, fixtures, prior_set, X.ModelConfig(horizon=1))
+    scored = model.expected_points([event_id])
 
-    flagged = scored_df[
-        (scored_df["id"].isin(xi_ids)) & (scored_df["availability"] < 0.8)
-    ]
+    squad = scored[scored["id"].isin(squad_ids)].copy()
+    if len(squad) < 15:
+        logger.warning("only %d of 15 squad players found in the model frame", len(squad))
 
-    if flagged.empty:
-        logger.info("All starters look good. No changes needed.")
+    flagged = squad[squad["availability"] < BENCH_BELOW_AVAILABILITY]
+    if len(flagged):
+        logger.warning("late doubts in the squad:")
+        for _, p in flagged.iterrows():
+            logger.warning("  %s (%s) availability %.0f%% - status '%s'",
+                           p["web_name"], p["team_name"], p["availability"] * 100, p["status"])
     else:
-        logger.warning(f"Flagged starters found:")
-        for _, player in flagged.iterrows():
-            # Get detailed reason from news profiles
-            profile = news_profiles.get(int(player["id"]), {})
-            news = profile.get("fpl_news", "No detail")
-            web_sources = profile.get("web_sources", [])
-            source_detail = "; ".join(s.get("detail", "") for s in web_sources[:2])
+        logger.info("no new availability concerns in the squad")
 
-            logger.warning(
-                f"  {player['web_name']}: availability={player['availability']:.0%} "
-                f"| FPL: {news[:60]} "
-                f"| Web: {source_detail[:60] if source_detail else 'n/a'}"
-            )
+    # Re-pick the XI from the squad we already own.
+    #
+    # Two things here must match the weekly run exactly, because this job's
+    # entire purpose is to make a *safety* adjustment to what that run
+    # submitted. Any difference in objective shows up as an unexplained lineup
+    # change hours before the deadline, indistinguishable from a real response
+    # to late news:
+    #
+    #   - the ownership tilt, which was omitted here and so ran at 0.0 while
+    #     the weekly run used config.OWNERSHIP_WEIGHT. Latent at the current
+    #     -0.3, but FPL_OWNERSHIP_WEIGHT is an environment variable and at
+    #     |w| >= 0.5 the two disagree on the eleven for no reason at all.
+    #   - optimise_lineup rather than build_squad. The squad is fixed, so this
+    #     is an ordering problem; build_squad re-solves a selection problem
+    #     against a budget equal to the squad's own cost, which is feasible
+    #     only by a hair and reports "infeasible" when it is not.
+    opt = SquadOptimizer(squad, value_col="xp_next", captain_col="xp_next",
+                         ownership_weight=OWNERSHIP_WEIGHT)
+    try:
+        sol = opt.optimise_lineup()
+    except (RuntimeError, ValueError) as e:
+        logger.error("could not re-optimise the lineup: %s", e)
+        return None
 
-        logger.info("Re-optimizing lineup...")
-        new_picks = selector.select_best_xi(scored_df)
-        new_picks = selector.pick_captain(new_picks, scored_df)
+    picks = []
+    position = 1
+    for _, p in sol.xi.iterrows():
+        picks.append({
+            "element": int(p["id"]),
+            "position": position,
+            "is_captain": int(p["id"]) == sol.captain,
+            "is_vice_captain": int(p["id"]) == sol.vice_captain,
+        })
+        position += 1
+    for _, p in sol.bench.iterrows():
+        picks.append({
+            "element": int(p["id"]), "position": position,
+            "is_captain": False, "is_vice_captain": False,
+        })
+        position += 1
 
-        if new_picks:
-            success = selector.apply_lineup(new_picks)
-            if success:
-                logger.info("Updated lineup submitted.")
-            else:
-                logger.error("Failed to submit updated lineup.")
+    previous_xi = {int(p["element"]) for p in my_team["picks"] if p["position"] <= 11}
+    new_xi = set(sol.xi["id"].astype(int))
+    changed = previous_xi != new_xi
+
+    old_captain = next((int(p["element"]) for p in my_team["picks"] if p.get("is_captain")), None)
+    captain_changed = old_captain != sol.captain
+
+    if changed or captain_changed:
+        names = scored.set_index("id")["web_name"].to_dict()
+        if changed:
+            logger.info("lineup changes: in %s | out %s",
+                        [names.get(i, i) for i in new_xi - previous_xi],
+                        [names.get(i, i) for i in previous_xi - new_xi])
+        if captain_changed:
+            logger.info("captain moved: %s -> %s", names.get(old_captain, old_captain), names.get(sol.captain))
+    else:
+        logger.info("lineup unchanged; nothing to submit")
+
+    logger.info("\n%s", format_squad(sol))
+
+    if not dry_run and (changed or captain_changed):
+        # No chip is passed: chip decisions belong to the weekly run, and
+        # re-sending one here would either be rejected or double-apply it.
+        if client.set_lineup(picks, chip=None) is not None:
+            logger.info("corrected lineup submitted")
         else:
-            logger.error("Could not generate new lineup.")
+            logger.error("lineup submission failed")
+    elif dry_run:
+        logger.info("[dry run] not submitting")
 
-    logger.info("Deadline check complete.")
+    return {
+        "event_id": event_id,
+        "flagged": [str(n) for n in flagged["web_name"].tolist()],
+        "lineup_changed": bool(changed),
+        "captain_changed": bool(captain_changed),
+        "captain": sol.captain,
+    }
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="FPL pre-deadline safety check")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+    return 0 if run_deadline_check(dry_run=args.dry_run) is not None else 1
 
 
 if __name__ == "__main__":
-    run_deadline_check()
+    sys.exit(main())

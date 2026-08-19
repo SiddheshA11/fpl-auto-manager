@@ -1,0 +1,57 @@
+name: Tests
+
+# The suite ran only on the author's laptop, on pandas 2.2.1, while CI resolved
+# 3.0.5. That divergence shipped a bug which stripped the position off every
+# player prior and halved the squad's expected points, with 113 tests green the
+# whole time. Tests now run on the same resolution the bot runs on.
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Record resolved versions
+        run: pip list --format=freeze | grep -iE '^(pandas|numpy|scipy|requests|pynacl)=='
+
+      # The priors are built from a third-party dataset, so the suite is
+      # meaningless without it - and a silent skip would restore exactly the
+      # false confidence this workflow exists to remove.
+      - name: Cache historical dataset
+        uses: actions/cache@v4
+        with:
+          path: data/history
+          key: fpl-history-${{ hashFiles('fetch_data.py') }}-v1
+
+      - name: Fetch history
+        run: python fetch_data.py
+
+      - name: Assert the dataset is actually present
+        run: |
+          test -s data/history/2025-26/merged_gw.csv || { echo "history missing"; exit 1; }
+          test -n "$(ls data/snapshots/bootstrap-static_*.json.gz 2>/dev/null)" || { echo "no snapshot"; exit 1; }
+
+      - name: Run tests
+        run: python3 -m pytest tests/ -q
+
+      # Deprecations are how the next pandas major will announce itself. Kept
+      # non-blocking so it reports rather than blocks, but it does report.
+      - name: Warn on deprecations
+        continue-on-error: true
+        run: python3 -m pytest tests/ -q -W error::FutureWarning -W error::DeprecationWarning

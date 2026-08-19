@@ -10,3 +10,6 @@ venv/
 *.egg-info/
 dist/
 build/
+
+# Third-party historical dataset: large and reproducible via fetch_data.py
+data/history/
