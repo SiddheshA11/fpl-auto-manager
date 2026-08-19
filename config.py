@@ -63,22 +63,36 @@ STRATEGY = {
 }
 
 # How far to tilt the squad away from pure expected points, toward or against
-# the field. This one *is* runtime configuration rather than a model constant,
+# the field. This is runtime configuration rather than a model constant,
 # because it encodes a goal the model cannot infer: what winning means here.
 #
 #   0.0   maximise expected points, indifferent to what everyone else owns
 #   > 0   track the template, trading points for a lower chance of a bad week
 #   < 0   buy differentials, trading points for a higher chance of a great one
 #
-# Set negative because the target is a private league of roughly twenty people.
-# Beating a small, known field means overtaking it, and a squad that mirrors
-# the template finishes wherever captaincy luck puts it - the differentials are
-# the only thing that can move you up. Protecting overall rank among millions
-# is the opposite problem and would want this positive.
+# Set POSITIVE, which is the opposite of where this started, because the
+# measurement contradicted the reasoning. The argument for negative was that a
+# twenty-person league is won by overtaking and therefore wants variance. It is
+# a good argument and it was wrong here, for a reason no amount of theory would
+# have surfaced. Measured on the GW1 pool:
 #
-# At -0.3 the GW1 squad gives up 2.8 xP over five gameweeks against the
-# points-optimal build (176.3 vs 179.1) and drops mean ownership from 19.0% to
-# 12.4%. -0.6 costs 11.2 xP for a further 2 points of ownership, which is a bad
-# trade: it starts dropping genuinely best-in-class assets rather than swapping
-# between near-equals.
-OWNERSHIP_WEIGHT = float(os.environ.get("FPL_OWNERSHIP_WEIGHT", "-0.3"))
+#     tilt      XI xP (5 GW)    mean EO    owns Haaland
+#    -0.30          163.95        11.0%          no
+#     0.00          167.28        18.2%          no
+#    +0.20          167.84        20.1%         YES
+#    +0.30          165.79        23.2%         YES
+#
+# +0.20 is the highest-scoring setting *and* the one that owns the 71%-owned
+# premium. -0.30 gave up 3.9 xP over five gameweeks AND carried the rank risk
+# of not owning him: worse on both axes at once.
+#
+# The mechanism is worth recording, because it is not obvious. Haaland is the
+# highest-xP player in the pool, and forcing him in *improves* the XI by 0.27
+# xP. The optimiser declines him anyway because funding him guts the bench, and
+# the objective values a bench place at 0.15 - which is correct in isolation.
+# So a 0.27 xP bench preference was quietly deciding a 71%-ownership question.
+# A small positive tilt is what stops that trade being made blind.
+#
+# This is the one number here worth re-measuring as the season moves: it
+# depends on the price and ownership landscape, not on anything structural.
+OWNERSHIP_WEIGHT = float(os.environ.get("FPL_OWNERSHIP_WEIGHT", "0.2"))
