@@ -41,31 +41,48 @@ Acting on it — folding recent minutes into the start rate — moved R² from
 
 ## Open work
 
-### 1. Multi-gameweek transfer sequencing — built, measured, NOT shipped
+### 1. Multi-gameweek transfer sequencing — built, measured, DEAD
 
-Both formulations exist on `feat/transfer-sequencing` and work:
+Both formulations exist on `feat/transfer-sequencing` and both work.
 `sequence.plan_by_enumeration` (beam search over transfer-count schedules,
 ~4s) and `sequence.plan_jointly` (one MILP over the horizon, ~5s). They
-demonstrably bank — over 2025-26 they hold 2+ free transfers in 17 and 14
-gameweeks against greedy's 6.
+demonstrably do the thing they were built for: over 2025-26 they hold 2+ free
+transfers in 17 and 14 gameweeks against greedy's 6, and roll 11 and 10 times
+against 7.
 
-**They are not wired into `manager.py`, because one season cannot measure
-them.** See "the noise floor" below. Do not merge on the strength of the
-+56/+78 full-season numbers; that is noise.
+**Neither produces a measurable gain.** Measured over 4 seasons x 3 windows of
+12 gameweeks = 12 paired samples, against greedy at horizon 5:
 
-To actually settle it, get more seasons. `fetch_data.py` pulls from
-vaastav/Fantasy-Premier-League, which has data back to 2016-17, and
-`HISTORY_SEASONS = 3` is the only thing limiting it — `--seasons` already
-overrides. Six usable seasons would cut the noise floor by roughly √2.4.
-That fetch is the prerequisite for measuring *any* optimiser change, not just
-this one.
+```
+  config          mean      SE       t    won
+  enumeration   -16.67   16.41   -1.02   6/12
+  joint MILP     -3.25   13.61   -0.24   5/12
+  ---- controls: changes that should mean nothing ----
+  horizon 4      -1.25    9.71   -0.13   6/12
+  horizon 6     +16.42    9.78   +1.68   8/12
+```
+
+Read the controls first. Changing the horizon from 5 to 6 is not a strategy
+change, and it scores **+16.4 at t=+1.68** — a *larger* apparent effect than
+either sequencer. That is the whole result: the apparatus manufactures effects
+of this size out of nothing, and the sequencers do not clear it.
+
+**Do not ship this, and do not "fix" it by tuning.** If you come back to it,
+the honest framing is that the greedy objective's horizon-blended value column
+is already doing the work — buying players who are good across five gameweeks
+is a form of regularisation, and swapping it for a per-gameweek plan that
+assumes you can correct later trades that robustness for a forecast that is
+only R² ~0.15 at the horizon.
+
+Do not read `horizon 6 +16.42` as a reason to retune `HORIZON`. It is noise,
+and it is in the table specifically to demonstrate that.
 
 ### 1a. The noise floor — read this before measuring any optimiser change
 
 `simulate.py` replays a season making real decisions and reports a points
-total. It is the right tool and it works. But a single season is chaotic:
-holding the strategy fixed at greedy and varying **only the horizon**, which
-is a minor change, moves the season total across a 141-point range.
+total. It is the right tool. But it is chaotic: hold the strategy fixed at
+greedy and vary **only the horizon**, and the 2025-26 season total moves
+across a 141-point range.
 
 ```
   greedy h=1   1989   (4 hits taken — a myopic objective churns)
@@ -76,23 +93,21 @@ is a minor change, moves the season total across a 141-point range.
   greedy h=7   2013
 ```
 
-SD across h=3..7 is about 53 points. Any optimiser effect smaller than that
-is unmeasurable with one season, and both sequencers land inside it.
+SD across h=3..7 is about 53 points on a single season. With 4 seasons and 12
+paired 12-gameweek windows the SE comes down to roughly 10-16 points per
+window, which is still larger than the sequencers' effect.
 
-Two study designs were tried and they contradict each other, which is the
-same fact seen twice:
+Two earlier one-season designs contradicted each other outright, which is the
+same fact seen twice — a single season cannot resolve this:
 
 ```
   8-GW windows, 8 independent      enumerate -32/season   joint -57/season
   staggered starts, all to GW38    enumerate +35/season   joint +36/season
 ```
 
-The windows truncate a 5-gameweek plan's payoff; the staggered runs are nested
-subsets of each other and so are not five samples. Neither is wrong. There is
-just not enough data.
-
-Note also that h=4 beats production's h=5 by 92 points here. **Do not retune
-`HORIZON` on that** — it is the same noise.
+**Always run a control.** A change that should not matter, measured the same
+way, is the only thing that tells you what your apparatus's noise looks like.
+Both control rows above exist for that reason and both earned their place.
 
 ### 2. Rank-aware objective
 
