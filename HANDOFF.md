@@ -60,16 +60,16 @@ Three concrete, unexercised leads, cheapest first:
    the -1 point. Nobody converts a card count into a probability of missing
    the next match, which is a pure minutes effect and fully deterministic
    from data already on disk. Cheapest thing on this list by a distance.
-2. **Manager change resets a start rate.** A new manager makes the previous
-   twenty gameweeks of team selection much weaker evidence. Currently the
-   start rate shrinks on a gameweek scale that knows nothing about this.
+2. ~~**Manager change resets a start rate.**~~ **MEASURED, DEAD.** See
+   `measure_regime.py` and "the manager-change null" below.
 3. **Predicted lineups.** The single largest source, and what the paid
    services actually sell. Not in the FPL API, so it means an external feed
    and real fragility. Measure 1 and 2 before deciding this is worth the
    dependency.
 
 Note what has already been *measured as worthless* and should not be retried:
-rotation-from-congestion, team-effect-from-injuries.
+rotation-from-congestion, team-effect-from-injuries, manager-change start-rate
+reweighting.
 
 ### Priority 2 — the rank-aware objective, now unblocked
 
@@ -178,6 +178,55 @@ same fact seen twice — a single season cannot resolve this:
 **Always run a control.** A change that should not matter, measured the same
 way, is the only thing that tells you what your apparatus's noise looks like.
 Both control rows above exist for that reason and both earned their place.
+
+### 1b. Manager-change start-rate reweighting - measured, DEAD
+
+`measure_regime.py`. The lead was that a new manager makes the previous twenty
+gameweeks of selection weak evidence, so the start rate should shrink harder.
+
+It cannot be tested directly: FPL carried managers as assets only in 2024-25
+and only from GW23, so **exactly one manager change is observable in a decade
+of history on disk**. Testing against a list written from memory measures the
+list, not the model.
+
+So the test is on the channel the fix must act through. Production blends a
+recent start rate into the season-long one at a fixed weight, and a regime
+shift can only help by raising that weight for the affected team:
+
+```
+    p = w * recent + (1 - w) * season      RECENT_MINUTES_MAX_WEIGHT = 0.70
+
+  band            churn     w*   Brier@w*  Brier@0.70    gain
+  Q1 stable       0.131   0.75     0.1051      0.1051  0.0000
+  Q2              0.180   0.70     0.0996      0.0996  0.0000
+  Q3              0.216   0.65     0.1044      0.1045  0.0001
+  Q4              0.259   0.70     0.0984      0.0984  0.0000
+  Q5 churning     0.356   0.85     0.0967      0.0981  0.0014
+  ---- CONTROL: shuffled churn, must be flat ----
+  Q1..Q5       0.22-0.23   0.75      ~0.10       ~0.10  0.0000
+```
+
+`w*` wobbles 0.65-0.85 with no monotone trend and Q3 breaks the ordering. The
+reason is that **w is barely identified**: across w in 0.50-1.00 the Brier
+spread is 0.0011 for stable teams and 0.0088 even in the churning quintile.
+Those `w*` figures are in-sample, so 0.0014 is an upper bound.
+
+Note the shape of the trap this is built around. Churn is *defined* as the gap
+between the two predictors, so comparing them head to head shows the recent one
+winning ever more as churn rises - a mechanical result that looks like a
+finding. Only the blend weight is a fair question. The first version of this
+measurement fell into exactly that and reported t=23.
+
+The detector also fails its one available validation. Southampton changed
+manager around GW17 of 2024-25; churn over GW18-22 sits at the 0.60, 0.38,
+0.39, 0.67 and 0.82 percentiles - never entering the top quintile. Caveat
+honestly: n=1, and it is a weak case, since Southampton were bottom under both
+managers and Jurić largely kept the XI.
+
+**By-product worth keeping: `RECENT_MINUTES_MAX_WEIGHT = 0.70` is now
+measured.** Pooled optimum is 0.75 with zero Brier difference, and the surface
+is flat around it. That is one of the Priority 3 hand-picked constants retired
+permanently.
 
 ### 2. Rank-aware objective
 
