@@ -39,16 +39,145 @@ minutes should justify itself against that number.
 Acting on it — folding recent minutes into the start rate — moved R² from
 0.269 to 0.319, the largest single improvement made.
 
+## What to build next, in order
+
+Ranked against the two measured facts that should govern everything: minutes
+dominate accuracy, and the decision side has a noise floor that most changes
+cannot clear. Anything not on this list should have to argue against these.
+
+### Priority 1 — minutes, because the headroom is still enormous
+
+The decomposition says our model scores R² 0.271 and *perfect minutes scaling
+the same xP* scores 0.440. Our minutes model is at R² 0.609 after the
+recent-minutes work. So closing the remaining minutes gap is worth up to
+**+0.169 R²** — against 0.004 for the entire goals/assists/clean-sheet/bonus
+apparatus. Nothing else on this page is in the same units.
+
+Three concrete, unexercised leads, cheapest first:
+
+1. **Yellow-card suspension risk — not modelled at all.** Five yellows is a
+   ban, and `yellow_cards` is already aggregated in `priors.py` as a rate for
+   the -1 point. Nobody converts a card count into a probability of missing
+   the next match, which is a pure minutes effect and fully deterministic
+   from data already on disk. Cheapest thing on this list by a distance.
+2. **Manager change resets a start rate.** A new manager makes the previous
+   twenty gameweeks of team selection much weaker evidence. Currently the
+   start rate shrinks on a gameweek scale that knows nothing about this.
+3. **Predicted lineups.** The single largest source, and what the paid
+   services actually sell. Not in the FPL API, so it means an external feed
+   and real fragility. Measure 1 and 2 before deciding this is worth the
+   dependency.
+
+Note what has already been *measured as worthless* and should not be retried:
+rotation-from-congestion, team-effect-from-injuries.
+
+### Priority 2 — the rank-aware objective, now unblocked
+
+Different axis entirely: this is about winning a 20-person league, not about
+accuracy, so the R² yardstick does not apply and neither does the noise floor
+on total points.
+
+`league_analyzer.py` computes rival ownership **and rival captain rates**, and
+is imported by no file in the repo — verified again this session. `sd_next`
+is computed on every production run and consumed by nothing. Those two plus
+the existing tilt are the whole of a rank-aware captaincy rule, and captaincy
+is the highest-leverage call of the week.
+
+The tilt currently runs on `selected_by_percent` — the 11-million-player
+template — when the field is 19 specific people. That proxy is known to be
+wrong in a specific direction: squad ownership is not captaincy ownership.
+
+Was blocked because `/entry/{id}/event/{gw}/picks/` returns nothing before a
+gameweek completes. **After GW1 it is unblocked.**
+
+### Priority 3 — measure the hand-picked optimiser constants
+
+`simulate.py` now makes this possible for the first time. `FREE_TRANSFER_VALUE
+= 0.3`, `DEFAULT_BENCH_WEIGHT = 0.15`, `HORIZON = 5` and `max_hits = 2` were
+all set by argument, never measured.
+
+Expect the answer to be "all inert". The horizon sweep already shows h=3 to
+h=7 are indistinguishable, and that is the knob with the most obvious
+mechanism. Run one batch, record the nulls, and stop touching them — a
+measured null is worth more than a plausible story, and it closes the question
+permanently.
+
+**Use a control every time.** See the noise floor below.
+
+### Priority 4 and below
+
+Team value and price changes (now that the budget binds at +0.20), and the
+bonus-curve refit. Both are small; the bonus curve is inside the 0.004.
+
 ## Open work
 
-### 1. Multi-gameweek transfer sequencing — the largest remaining gap
+### 1. Multi-gameweek transfer sequencing — built, measured, DEAD
 
-Transfers are one-step greedy: this week's move optimised against a 5-gameweek
-horizon, with no plan for a *sequence*. Bank a transfer now to make a double
-move next week, route toward a wildcard, take a hit early to catch a fixture
-swing — none of it is modelled. This is what FPL Copilot claims as its
-advantage, and chips already work this way (`chips.solve_assignment`); transfers
-do not.
+Both formulations exist on `feat/transfer-sequencing` and both work.
+`sequence.plan_by_enumeration` (beam search over transfer-count schedules,
+~4s) and `sequence.plan_jointly` (one MILP over the horizon, ~5s). They
+demonstrably do the thing they were built for: over 2025-26 they hold 2+ free
+transfers in 17 and 14 gameweeks against greedy's 6, and roll 11 and 10 times
+against 7.
+
+**Neither produces a measurable gain.** Measured over 4 seasons x 3 windows of
+12 gameweeks = 12 paired samples, against greedy at horizon 5:
+
+```
+  config          mean      SE       t    won
+  enumeration   -16.67   16.41   -1.02   6/12
+  joint MILP     -3.25   13.61   -0.24   5/12
+  ---- controls: changes that should mean nothing ----
+  horizon 4      -1.25    9.71   -0.13   6/12
+  horizon 6     +16.42    9.78   +1.68   8/12
+```
+
+Read the controls first. Changing the horizon from 5 to 6 is not a strategy
+change, and it scores **+16.4 at t=+1.68** — a *larger* apparent effect than
+either sequencer. That is the whole result: the apparatus manufactures effects
+of this size out of nothing, and the sequencers do not clear it.
+
+**Do not ship this, and do not "fix" it by tuning.** If you come back to it,
+the honest framing is that the greedy objective's horizon-blended value column
+is already doing the work — buying players who are good across five gameweeks
+is a form of regularisation, and swapping it for a per-gameweek plan that
+assumes you can correct later trades that robustness for a forecast that is
+only R² ~0.15 at the horizon.
+
+Do not read `horizon 6 +16.42` as a reason to retune `HORIZON`. It is noise,
+and it is in the table specifically to demonstrate that.
+
+### 1a. The noise floor — read this before measuring any optimiser change
+
+`simulate.py` replays a season making real decisions and reports a points
+total. It is the right tool. But it is chaotic: hold the strategy fixed at
+greedy and vary **only the horizon**, and the 2025-26 season total moves
+across a 141-point range.
+
+```
+  greedy h=1   1989   (4 hits taken — a myopic objective churns)
+  greedy h=3   2114
+  greedy h=4   2154
+  greedy h=5   2062   <- production
+  greedy h=6   2084
+  greedy h=7   2013
+```
+
+SD across h=3..7 is about 53 points on a single season. With 4 seasons and 12
+paired 12-gameweek windows the SE comes down to roughly 10-16 points per
+window, which is still larger than the sequencers' effect.
+
+Two earlier one-season designs contradicted each other outright, which is the
+same fact seen twice — a single season cannot resolve this:
+
+```
+  8-GW windows, 8 independent      enumerate -32/season   joint -57/season
+  staggered starts, all to GW38    enumerate +35/season   joint +36/season
+```
+
+**Always run a control.** A change that should not matter, measured the same
+way, is the only thing that tells you what your apparatus's noise looks like.
+Both control rows above exist for that reason and both earned their place.
 
 ### 2. Rank-aware objective
 
@@ -114,6 +243,13 @@ to price a tail.
 - **Tests that exercise a helper do not prove the helper is called.** Three
   separate fixes could be deleted from production with the whole suite green.
   Prefer an end-to-end test that inspects what the client was actually handed.
+  A fourth was found this way: `recommend.py` passed no `ownership_weight`, so
+  the tool used to preview a plan before a deadline optimised at 0.0 while the
+  weekly run used +0.20 — different squad, no Haaland, 0.56 xP short.
+  `deadline_check.py` had the identical bug and carries a comment about it.
+  Now fixed, with a test that records the optimiser's constructor kwargs
+  through a full `recommend.main()` run.
+- **A season total is not a measurement.** See "the noise floor" above.
 
 ## Verified API facts
 

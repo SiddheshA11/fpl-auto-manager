@@ -24,6 +24,7 @@ import pandas as pd
 import priors
 import xp_model as X
 from fetch_data import LIVE_ENDPOINTS, _get
+from config import OWNERSHIP_WEIGHT
 from optimizer import SquadOptimizer, format_squad
 
 logger = logging.getLogger("fpl_auto.recommend")
@@ -112,7 +113,15 @@ def main() -> int:
     owned = [int(s) for s in args.squad.split(",") if s.strip()] if args.squad else []
     pool = _exclude_unavailable(scored, keep_ids=owned)
 
-    opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next")
+    # The tilt has to match the weekly run. This tool exists to preview what
+    # the bot will do, and it defaulted to optimizer.OWNERSHIP_WEIGHT (0.0)
+    # while manager.py used config.OWNERSHIP_WEIGHT - so at the current +0.20
+    # it previewed a squad without Haaland and 0.56 xP short of the one that
+    # would actually be submitted. deadline_check.py had the identical bug and
+    # carries a note about it; this caller was missed.
+    logger.info("ownership tilt: %+.2f", OWNERSHIP_WEIGHT)
+    opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
+                         ownership_weight=OWNERSHIP_WEIGHT)
 
     if args.transfer:
         if not owned:
