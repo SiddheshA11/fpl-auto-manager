@@ -211,6 +211,25 @@ CURRENT_SEASON_WEIGHT_MINUTES = 540.0
 # Availability by FPL status flag, used when chance_of_playing is not published.
 STATUS_AVAILABILITY = {"a": 1.0, "d": 0.75, "i": 0.0, "s": 0.0, "u": 0.0, "n": 0.0}
 
+# Premier League yellow-card bans: (cards, matchweek by which they must fall,
+# matches banned). Five bookings inside the first 19 matches costs one match,
+# ten inside 32 costs two, fifteen across the season costs three. A threshold
+# whose window has passed can no longer bite.
+#
+# The gameweek AFTER the fifth card is already handled in production without
+# any of this: FPL sets status='s' and STATUS_AVAILABILITY zeroes the player.
+# What no flag can cover is the gameweek that has not happened yet - a player
+# sitting on four bookings carries a real chance of a ban inside the five
+# gameweeks the optimiser is planning over, and is currently priced at full
+# minutes throughout. Measured over 2020-26, a starter on exactly four yellows
+# is banned somewhere in a five-gameweek horizon 50.7% of the time.
+YELLOW_BAN_RULES = ((5, 19, 1), (10, 32, 2), (15, 38, 3))
+
+# Exposure proxy for "will he be on the pitch to collect one". Deliberately
+# not exp_minutes: this is consumed by _availability, which minutes_model calls
+# before expected minutes exist, so reading them here is circular.
+YELLOW_EXPOSURE_MINUTES = 90.0
+
 # P(start) implied by price alone, per position, from 1,416 player-seasons over
 # 2024-25 and 2025-26. FPL prices a player according to the role it expects him
 # to have, which makes price the best available signal for someone with no
@@ -522,6 +541,83 @@ class XPModel:
                 return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
         return None
 
+    def _suspension_risk(self, event: int | None, ahead: int) -> pd.Series:
+        """
+        P(serving a card ban) in `event`, which is `ahead` gameweeks from now.
+
+        Only the *unearned* ban is modelled. A player already banned carries
+        status='s' and is zeroed by availability before this is consulted, so
+        counting him again here would price one absence twice; anyone already
+        at or past a threshold is therefore returned at zero risk against that
+        threshold and measured against the next one up.
+
+        Cards arrive as a Poisson process in exposure, so the count over h
+        gameweeks is Poisson(h * lambda). A one-match ban is served in the
+        gameweek immediately after the threshold falls, which makes the risk in
+        gameweek h the probability the threshold is crossed *exactly* in
+        gameweek h-1 - not the probability it has been crossed by then, which
+        would leave a player banned for the rest of the horizon after a single
+        booking.
+        """
+        df = self.players
+        zero = pd.Series(0.0, index=df.index)
+        if event is None or ahead <= 0:
+            return zero
+
+        # Before a ball is kicked the bootstrap's `yellow_cards` still holds
+        # LAST season's totals, which would suspend half the league in GW1.
+        # Same trap as the rate blending in _build_player_frame.
+        if not any(e.get("finished") for e in self.bootstrap.get("events", [])):
+            return zero
+
+        cards = pd.to_numeric(df["yellow_cards"], errors="coerce").fillna(0.0)
+        rate90 = pd.to_numeric(df["yellow90"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+        start_rate = df["start_rate"].clip(0.0, 1.0).fillna(0.0)
+        # Expected bookings per gameweek: the rate, scaled by how much football
+        # the player is expected to be on the pitch for.
+        lam = (rate90 * start_rate * (YELLOW_EXPOSURE_MINUTES / 90.0)).clip(0.0, 2.0)
+
+        # Each player is measured against his OWN lowest live threshold: the
+        # first one he has not already reached whose window is still open. A
+        # player on seven bookings is done with the five-card rule and is now
+        # running at the ten-card one, so a single shared threshold would let
+        # him off entirely.
+        need = pd.Series(np.nan, index=df.index)
+        for threshold, deadline_gw, _matches in YELLOW_BAN_RULES:
+            if event > deadline_gw:
+                continue                       # window closed, cannot bite
+            gap = threshold - cards
+            need = need.where(need.notna() | (gap <= 0), gap)
+        live = need.notna() & (need > 0)
+        if not live.any():
+            return zero
+
+        need = need.fillna(0.0)
+        # P(threshold crossed exactly in gameweek `ahead - 1`), so a one-match
+        # ban is served once rather than for the rest of the horizon.
+        before = self._poisson_at_least(need, lam * (ahead - 1))
+        through = self._poisson_at_least(need, lam * ahead)
+        risk = (through - before).clip(0.0, 1.0)
+        return risk.where(live, 0.0).clip(0.0, 1.0)
+
+    @staticmethod
+    def _poisson_at_least(need: pd.Series, lam: pd.Series) -> pd.Series:
+        """P(N >= need) for N ~ Poisson(lam), vectorised over players."""
+        need = need.clip(lower=0)
+        lam = lam.clip(lower=0.0)
+        out = pd.Series(0.0, index=need.index)
+        # Sum the tail directly: `need` is 1-5 in every case that matters, so
+        # the CDF is a handful of terms and scipy is not worth the import here.
+        k_max = int(need.max()) if len(need) else 0
+        cdf = pd.Series(0.0, index=need.index)
+        term = pd.Series(np.exp(-lam), index=need.index)
+        for k in range(0, k_max + 1):
+            if k > 0:
+                term = term * lam / k
+            cdf = cdf + term.where(need > k, 0.0)
+        out = (1.0 - cdf).clip(0.0, 1.0)
+        return out.where(lam > 0, 0.0)
+
     def _availability(self, event: int | None = None) -> pd.Series:
         """
         P(player is fit and selectable), for `event` specifically.
@@ -580,6 +676,15 @@ class XPModel:
                 out.iloc[pos] = news.availability_on(
                     info, when, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
                 )
+
+        # An unearned card ban, applied last because the news loop assigns to
+        # `out` wholesale and would otherwise discard it. Multiplicative
+        # because it is independent of fitness: a player can be both a doubt
+        # and one booking from a ban, and both have to go his way for him to
+        # play.
+        risk = self._suspension_risk(event, ahead)
+        if risk.any():
+            out = out * (1.0 - risk)
         return out.clip(0.0, 1.0)
 
     def _absence_days(self, pid: int, info) -> float | None:
