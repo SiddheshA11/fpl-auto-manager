@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -136,3 +137,57 @@ def test_nobody_starts_more_often_than_he_is_available(model):
     avail = pd.Series(0.4, index=rate.index)
     out = model._normalise_starts_within_team(rate, avail)
     assert (out <= avail + 1e-9).all(), "start probability exceeded availability"
+
+
+# ---------------------------------------------------------------------------
+# Edge cases on the redistribution helper itself. These are unit-level on
+# purpose: the tests above already prove the helper is reached from production,
+# so these are free to hammer the arithmetic at its boundaries.
+# ---------------------------------------------------------------------------
+
+
+def test_a_wholly_unavailable_group_allocates_nothing():
+    out = X._redistribute_unavailable(pd.Series([0.9, 0.1]), pd.Series([0.0, 0.0]), 1.0)
+    assert (out == 0.0).all()
+
+
+def test_a_lone_player_is_capped_at_his_own_availability():
+    out = X._redistribute_unavailable(pd.Series([1.0]), pd.Series([0.5]), 1.0)
+    assert out.iloc[0] <= 0.5 + 1e-9
+
+
+def test_a_squad_thinner_than_its_shirts_does_not_diverge():
+    """Three players cannot fill ten shirts; the loop must stop, not spin."""
+    out = X._redistribute_unavailable(pd.Series([0.98] * 3), pd.Series([1.0] * 3), 10.0)
+    assert np.isfinite(out).all()
+    assert (out <= 0.98 + 1e-9).all()
+
+
+def test_a_fully_fit_squad_is_left_alone():
+    pecking = pd.Series([0.5, 0.3, 0.2])
+    out = X._redistribute_unavailable(pecking, pd.Series([1.0] * 3), 1.0)
+    assert float(out.sum()) == pytest.approx(1.0, abs=1e-6)
+
+
+def test_an_empty_group_is_handled():
+    out = X._redistribute_unavailable(pd.Series(dtype=float), pd.Series(dtype=float), 1.0)
+    assert len(out) == 0
+
+
+def test_fuzz_never_hands_out_more_than_availability():
+    """
+    The one invariant that must hold whatever the inputs: nobody starts more
+    often than he is available to. Randomised because the redistribution loop
+    has several branches and hand-picked cases miss them.
+    """
+    rng = np.random.default_rng(1)
+    for _ in range(300):
+        n = int(rng.integers(1, 12))
+        pecking = pd.Series(rng.random(n))
+        shirts = min(10.0, n * 0.98)
+        pecking = pecking / pecking.sum() * shirts
+        avail = pd.Series(rng.random(n))
+        out = X._redistribute_unavailable(pecking, avail, shirts)
+        assert (out <= avail + 1e-9).all()
+        assert (out >= -1e-12).all()
+        assert np.isfinite(out).all()
