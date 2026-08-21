@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import priors
@@ -159,3 +160,46 @@ def test_the_next_gameweek_is_left_to_fpls_own_flag(state):
         return float(model.minutes_model(events[0]).loc[row, "exp_minutes"])
 
     assert first_gw_minutes(4) == pytest.approx(first_gw_minutes(0))
+
+
+# ---------------------------------------------------------------------------
+# The Poisson tail the risk model is built on. Unit-level on purpose: the tests
+# above already prove the model is reached from production, so these are free
+# to hammer the arithmetic where it would misbehave quietly.
+# ---------------------------------------------------------------------------
+
+
+def test_poisson_tail_matches_scipy():
+    """Verified against an independent implementation, not against itself."""
+    scipy_stats = pytest.importorskip("scipy.stats")
+    need = pd.Series([1.0, 2.0, 3.0, 1.0, 5.0])
+    lam = pd.Series([0.16, 0.16, 0.30, 0.0, 0.5])
+    got = X.XPModel._poisson_at_least(need, lam)
+    want = [1.0 - scipy_stats.poisson.cdf(n - 1, l) if l > 0 else 0.0
+            for n, l in zip(need, lam)]
+    assert got.tolist() == pytest.approx(want, abs=1e-12)
+
+
+def test_no_exposure_means_no_risk():
+    assert float(X.XPModel._poisson_at_least(pd.Series([1.0]), pd.Series([0.0])).iloc[0]) == 0.0
+
+
+def test_a_distant_threshold_stays_in_bounds():
+    """Fifteen cards at a low rate underflows; it must not go negative."""
+    v = float(X.XPModel._poisson_at_least(pd.Series([15.0]), pd.Series([0.2])).iloc[0])
+    assert 0.0 <= v < 1e-10
+
+
+def test_a_spent_threshold_is_clipped_not_inverted():
+    v = float(X.XPModel._poisson_at_least(pd.Series([-3.0]), pd.Series([0.2])).iloc[0])
+    assert 0.0 <= v <= 1.0
+
+
+def test_cumulative_risk_is_monotone_in_the_horizon():
+    vals = [float(X.XPModel._poisson_at_least(pd.Series([1.0]), pd.Series([0.15 * h])).iloc[0])
+            for h in range(1, 6)]
+    assert all(b >= a for a, b in zip(vals, vals[1:])), vals
+
+
+def test_an_empty_frame_is_handled():
+    assert len(X.XPModel._poisson_at_least(pd.Series(dtype=float), pd.Series(dtype=float))) == 0
