@@ -250,11 +250,41 @@ starters, compared within-player against their own trailing average:
   difference -0.0077   SE 0.0081   t = -0.95   (-0.88 minutes per starter)
 ```
 
-Nothing there. The split that might have shown something - a player flying to
-South America against one playing at Wembley - is **not reconstructible**:
-FPL's `region` is a bare numeric country id (241 is England, the rest unknown)
-with no lookup shipped in the dataset, so a federation split would be guesswork.
-Recorded as untested rather than null.
+Nothing there in aggregate. The split is now possible: `region` is an
+alphabetical country index, and the ids in `measure_international.py` were each
+confirmed by reading off a player whose nationality is not in doubt. Two early
+probes matched the wrong player - region 21 resolves to Belgium via Amadou
+Onana, not Cote d'Ivoire, and a search for "Erling" matched "Sterling" - so
+every id is one checked by name. `region` appears only from 2024-25, but
+nationality is static, so the map is built on `code` and applied backward.
+
+```
+  band                n after   ratio   n ctrl   ratio     diff       t
+  CAF                     213   0.834     1366   0.913   -0.079   -2.24
+  CONMEBOL                387   0.912     2620   0.913   -0.002   -0.07
+  UEFA other             1250   0.908     8556   0.901   +0.008   +0.57
+  far AFC/CONCACAF        105   0.957      595   0.894   +0.063   +1.37
+  home nations           1204   0.900     7427   0.904   -0.005   -0.32
+```
+
+Only CAF moves, and the AFCON window says the same thing: CAF players in
+January run 0.848 against 0.949 for UEFA, a difference of -0.077 (t = -1.95)
+against a control of +0.008 for the same pairing outside January -
+difference-in-differences **-0.085**.
+
+**Do not ship this yet.** Two reasons. First, that is five bands times two
+questions, and |t| of 2.24 and 1.95 does not survive a correction for ten
+comparisons - Bonferroni wants 2.8. AFCON is at least a pre-specified
+hypothesis rather than a fishing expedition, which is the only thing keeping it
+alive. Second, CONMEBOL coming out at **exactly zero** is a problem for the
+story: if the mechanism were long-haul travel, South America should be the
+worst band, and it is flat. That points at AFCON the tournament rather than
+flying as such, which is a narrower and more seasonal effect than "international
+duty".
+
+Impact on the current squad if it were shipped today: **none**. The GW1-5
+horizon has gaps of 6-7 days throughout, no international break and no January,
+so every multiplier would be 1.0.
 
 ### 2. Rank-aware objective
 

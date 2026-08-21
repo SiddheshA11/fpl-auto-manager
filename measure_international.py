@@ -4,10 +4,16 @@ Breaks are not labelled anywhere, but they are visible in the fixture
 calendar: a normal gameweek follows the last by about seven days, an
 international break stretches that to a fortnight.
 
-Nationality would be the interesting split - a player flying to South America
-loses far more than one playing at Wembley - but FPL's `region` is a bare
-numeric country id with no lookup shipped in the dataset, so that split would
-be guesswork and is not attempted here.
+FPL's `region` is a bare numeric country id with no lookup shipped in the
+dataset. It is an alphabetical country index, and REGION_* below were each
+confirmed by reading off a player whose nationality is not in doubt, never
+guessed from the ordering - two early probes matched the wrong player (region
+21 resolves to Belgium via Amadou Onana, not Cote d'Ivoire; a search for
+"Erling" matched "Sterling"), so every id here is one checked by name.
+
+`region` is only present in 2024-25 onward, but nationality is static, so the
+map is built on `code` - the stable cross-season player id the rest of the
+codebase keys on - and applied backward through each season's id->code table.
 
 CONTROL: ordinary gameweeks, same seasons, same players.
 """
@@ -18,6 +24,33 @@ import numpy as np, pandas as pd
 import priors
 
 H=Path(__file__).parent/"data"/"history"
+
+# Confederation matters more than country: what costs minutes is the flight and
+# the tournament, not the flag. CONMEBOL and CAF players cross an ocean; the
+# home nations mostly play at Wembley.
+CONMEBOL = {10: "Argentina", 30: "Brazil", 48: "Colombia", 62: "Ecuador",
+            168: "Paraguay", 230: "Uruguay"}
+CAF = {38: "Cameroon", 50: "DR Congo", 54: "Cote d'Ivoire", 63: "Egypt",
+       81: "Ghana", 132: "Mali", 157: "Nigeria"}
+FAR = {13: "Australia", 107: "Jamaica", 114: "South Korea", 229: "USA"}
+HOME = {241: "England", 242: "N Ireland", 243: "Scotland", 244: "Wales",
+        104: "Ireland"}
+
+
+def confederation(region: float | None) -> str | None:
+    """Travel burden band for an FPL region id."""
+    if region is None or region != region:      # NaN
+        return None
+    r = int(region)
+    if r in CONMEBOL:
+        return "CONMEBOL"
+    if r in CAF:
+        return "CAF"
+    if r in FAR:
+        return "far AFC/CONCACAF"
+    if r in HOME:
+        return "home nations"
+    return "UEFA other"
 SEASONS=["2021-22","2022-23","2023-24","2024-25","2025-26"]
 out=[]
 for s in SEASONS:
