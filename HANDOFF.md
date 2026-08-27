@@ -55,11 +55,11 @@ apparatus. Nothing else on this page is in the same units.
 
 Three concrete, unexercised leads, cheapest first:
 
-1. **Yellow-card suspension risk — not modelled at all.** Five yellows is a
-   ban, and `yellow_cards` is already aggregated in `priors.py` as a rate for
-   the -1 point. Nobody converts a card count into a probability of missing
-   the next match, which is a pure minutes effect and fully deterministic
-   from data already on disk. Cheapest thing on this list by a distance.
+1. ~~**Yellow-card suspension risk.**~~ **BUILT.** `_suspension_risk` in
+   `xp_model.py`, `measure_suspension.py`, `tests/test_suspension.py`. Read
+   "what the suspension model is and is not" below before extending it - the
+   naive version of this feature is a no-op, and the obvious way to measure it
+   reports a gain that is not real.
 2. **Manager change resets a start rate.** A new manager makes the previous
    twenty gameweeks of team selection much weaker evidence. Currently the
    start rate shrinks on a gameweek scale that knows nothing about this.
@@ -179,6 +179,55 @@ same fact seen twice — a single season cannot resolve this:
 way, is the only thing that tells you what your apparatus's noise looks like.
 Both control rows above exist for that reason and both earned their place.
 
+### 1a. What the suspension model is, and is not
+
+The obvious version of this feature is a **no-op**, and it is worth knowing why
+before touching it. FPL sets `status='s'` on a banned player and
+`STATUS_AVAILABILITY` maps that to 0.0, so **the gameweek after the fifth card
+is already handled in production** and always was. Modelling it again there
+prices one absence twice.
+
+What no flag can cover is the card that has not been shown yet. Measured over
+2020-26, a starter sitting on exactly four bookings is banned somewhere inside
+a five-gameweek horizon **50.7% of the time** (n=1048), and was priced at full
+minutes for all five. That is roughly 2 xP unpriced on one player, and the
+optimiser makes transfer calls on far less. So the model runs only on
+`ahead >= 1` and leaves the next gameweek to FPL.
+
+Frequency, so the size is not oversold: ~3 affected starters league-wide at
+GW8, 15 at GW12, 30 at GW16, 38 at GW19. Concentrated in the run-up to the
+matchweek-19 cutoff, and worth **0.8% of total squared minutes error** - real,
+cheap, and small. It will not move a backtest R2 and is not meant to.
+
+**Do not measure this with `backtest.py`.** `build_state` hardcodes
+`status='a'` and `chance_of_playing_next_round=None` for every player, so the
+backtest is blind to availability in a way production is not. It would credit
+this model for rediscovering bans the status flag already handles, and report a
+gain that does not exist in production. `simulate.py` cannot help either: the
+effect is worth 5-20 points a season against a ~53-point noise floor.
+
+`measure_suspension.py` measures the claim the model actually makes - a
+probability - held out by season:
+
+```
+  horizon GW       predicted   realised     error
+  1                    0.138      0.158    -0.020
+  2                    0.119      0.109     0.010
+  3                    0.103      0.096     0.006
+  4                    0.088      0.074     0.014
+  5                    0.076      0.069     0.008
+  cumulative           0.524      0.507     0.018
+```
+
+Over-prediction is the safe direction: the model assumes the player is on the
+pitch every gameweek of the horizon, and real players are rested and rotated.
+
+**Known limitation, and it is not in this model.** Goalkeepers barely respond.
+Their group in `_normalise_starts_within_team` has one shirt and
+`GK_COMPETITION_ALPHA = 3.0`, so allocation is on relative standing alone and a
+first-choice keeper's availability cut is destroyed - Pickford and Leno retain
+**0.00** of a 25% cut. That damps every availability signal a keeper gets,
+injury flags included, not just this one. Tracked separately.
 ### 1c. Availability was silently disabled for goalkeepers - FIXED
 
 `_normalise_starts_within_team` divides a fixed number of shirts by relative
