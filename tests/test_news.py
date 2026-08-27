@@ -142,7 +142,7 @@ def scored():
     ps = priors.build_priors()
     model = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=5))
     events = X.next_events(bootstrap, 5)
-    return model.expected_points(events), events, bootstrap
+    return model.expected_points(events), events, bootstrap, model
 
 
 def test_a_player_returning_mid_horizon_is_worth_nothing_now_and_something_later(scored):
@@ -151,13 +151,24 @@ def test_a_player_returning_mid_horizon_is_worth_nothing_now_and_something_later
     back for gameweek three must score zero now and a real number later - not
     zero throughout, which is what a single flat availability produced.
     """
-    frame, events, bootstrap = scored
+    frame, events, bootstrap, model = scored
     ids = {int(e["id"]): e for e in bootstrap["elements"]}
+
+    # Selection has to be on the player's own FIRST FIXTURE, not on the
+    # gameweek deadline. A gameweek runs Friday to Monday, and someone whose
+    # return date lands on his team's Saturday kickoff is available for that
+    # gameweek - Garner returns 22 Aug and Everton play on 22 Aug. Selecting on
+    # the deadline swept those players in and then asserted they score zero,
+    # which encoded the anchor bug as the expected behaviour.
+    first_kickoffs = model._return_dates_by_team(events[0])
 
     returning = []
     for _, row in frame.iterrows():
         info = news.parse((ids[int(row["id"])].get("news") or ""))
         if info and info.returns_on and row["status"] in ("i", "s"):
+            kick = first_kickoffs.get(int(row["team"]))
+            if kick is not None and kick >= info.returns_on:
+                continue                      # genuinely back for gameweek one
             first, last = row[f"xp_gw{events[0]}"], row[f"xp_gw{events[-1]}"]
             if last > 0.5:
                 returning.append((row["web_name"], first, last))
@@ -169,7 +180,7 @@ def test_a_player_returning_mid_horizon_is_worth_nothing_now_and_something_later
 
 
 def test_an_indefinite_absence_scores_zero_across_the_whole_horizon(scored):
-    frame, events, bootstrap = scored
+    frame, events, bootstrap, model = scored
     ids = {int(e["id"]): e for e in bootstrap["elements"]}
     checked = 0
     for _, row in frame.iterrows():
@@ -191,7 +202,7 @@ def test_a_flagged_doubt_recovers_across_the_horizon(scored):
     import priors
     import xp_model as X
 
-    _, events, bootstrap = scored
+    _, events, bootstrap, _model = scored
     snaps = pathlib.Path(__file__).resolve().parent.parent / "data" / "snapshots"
     fixtures = X.load_snapshot(sorted(snaps.glob("fixtures_*.json.gz"), reverse=True)[0])
     model = X.XPModel(bootstrap, fixtures, priors.build_priors(), X.ModelConfig(horizon=5))
