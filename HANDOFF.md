@@ -217,6 +217,80 @@ for defenders — much smaller than feared.
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
 
+## Where the minutes error actually is - re-measured on the real model
+
+`measure_minutes_decomp.py`. The first version of this ran before the harness
+fix below and was therefore on the crippled model; these are the numbers that
+count. Both columns, same run, so the effect of the lags is visible directly:
+
+```
+                          without lags        with lags (production)
+  minutes R2                  0.4742                     0.6085
+  segment              n   share err   bias      share err   bias
+  never plays      10621       0.043   +1.9          0.047   +1.4
+  fringe <30        3915       0.253   -6.8          0.265   -7.1
+  rotation 30-60    3976       0.387   -2.9          0.373   -4.1
+  regular 60-80     2504       0.223   +1.1          0.215   -0.4
+  ever-present 80+  1758       0.094   -3.5          0.100   -1.8
+```
+
+**0.6085 matches the 0.609 this document has always quoted, to three decimals.**
+That figure was never unreproducible - it just needed the lags the harness was
+not passing. An earlier session note in this file claiming otherwise was wrong.
+
+Two things to carry:
+
+**The composition survives.** Every segment's share of squared error moves by
+0.03 or less. Rotation and fringe still carry ~64% of it between them, and
+that is still not where a squad's players live. The ranking of what to work on
+does not change.
+
+**The addressable headroom is smaller than it looked.** Established regulars
+who blank fall from 16.6% of all squared error to **13.9%**, and the model now
+prices them at **49.3 expected minutes rather than 69.9** - the lag view
+already catches much of a player losing his place. Rescaling the split in 1d by
+0.139/0.166 gives roughly 7.9% injury absence, 4.6% unexplained rotation, 0.7%
+card suspensions.
+
+And the headline gap needs restating. Priority 1 sizes the prize as
+`0.440 - 0.271 = +0.169` points R2. Our points R2 is now measured at **0.3093**,
+so the gap to perfect minutes is **0.131**, not 0.169 - and the 0.440 itself was
+measured on the crippled model and is due a re-run before anyone leans on it.
+
+## The offline harnesses were scoring the wrong model - FIXED
+
+`recent_minutes` was supplied by `manager.py` and nothing else. `backtest.py`
+and `simulate.py` both built `XPModel` without it, so `_blend_recent_minutes`
+returned at its first line and the start rate was never touched. **Every
+offline measurement in this repo evaluated a model missing the input this
+document credits with the largest single improvement ever made.**
+
+Measured on 2025-26 GW10-38, same priors both sides:
+
+```
+                          MAE     RMSE       R2
+  without recent_minutes  1.0615  2.0494   0.2570
+  with recent_minutes     0.9791  1.9757   0.3093
+                                          +0.052
+```
+
+The claim in the state table - "moved R2 from 0.269 to 0.319", a gain of 0.050
+- reproduces at **+0.052**. Absolute levels sit ~0.01 lower because local disk
+builds priors from six usable seasons; the *gain* is the reproducible part. So
+the figure was always real, and `backtest.py` was understating the model by
+0.05 R2 while reporting it.
+
+Consequences worth carrying forward:
+
+- Any measurement taken before this landed was on the crippled model. That
+  includes the minutes decomposition in 1d - its **level** is wrong, though the
+  compositional split should survive. Re-run before quoting the number.
+- A regression in `_blend_recent_minutes` was invisible to every offline tool
+  in the repo. `tests/test_offline_recent_minutes.py` now records what
+  `run_backtest` actually hands the model, through a real call.
+- The optimiser-constant sweeps in Priority 3 were measured on a model missing
+  its dominant input and are worth nothing until re-run.
+
 ## Things that will bite you
 
 - **`--ref` selects the code, not the workflow registration.** A workflow must
