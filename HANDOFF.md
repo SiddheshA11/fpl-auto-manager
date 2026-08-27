@@ -217,6 +217,40 @@ for defenders — much smaller than feared.
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
 
+## The offline harnesses were scoring the wrong model - FIXED
+
+`recent_minutes` was supplied by `manager.py` and nothing else. `backtest.py`
+and `simulate.py` both built `XPModel` without it, so `_blend_recent_minutes`
+returned at its first line and the start rate was never touched. **Every
+offline measurement in this repo evaluated a model missing the input this
+document credits with the largest single improvement ever made.**
+
+Measured on 2025-26 GW10-38, same priors both sides:
+
+```
+                          MAE     RMSE       R2
+  without recent_minutes  1.0615  2.0494   0.2570
+  with recent_minutes     0.9791  1.9757   0.3093
+                                          +0.052
+```
+
+The claim in the state table - "moved R2 from 0.269 to 0.319", a gain of 0.050
+- reproduces at **+0.052**. Absolute levels sit ~0.01 lower because local disk
+builds priors from six usable seasons; the *gain* is the reproducible part. So
+the figure was always real, and `backtest.py` was understating the model by
+0.05 R2 while reporting it.
+
+Consequences worth carrying forward:
+
+- Any measurement taken before this landed was on the crippled model. That
+  includes the minutes decomposition in 1d - its **level** is wrong, though the
+  compositional split should survive. Re-run before quoting the number.
+- A regression in `_blend_recent_minutes` was invisible to every offline tool
+  in the repo. `tests/test_offline_recent_minutes.py` now records what
+  `run_backtest` actually hands the model, through a real call.
+- The optimiser-constant sweeps in Priority 3 were measured on a model missing
+  its dominant input and are worth nothing until re-run.
+
 ## Things that will bite you
 
 - **`--ref` selects the code, not the workflow registration.** A workflow must
