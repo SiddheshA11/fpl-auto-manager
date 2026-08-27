@@ -513,7 +513,12 @@ class XPModel:
     # ---------- minutes ----------
 
     def _event_date(self, event: int) -> date | None:
-        """The deadline date of a gameweek - when availability is judged."""
+        """
+        The deadline date of a gameweek.
+
+        Kept for callers that genuinely want the deadline. It is the WRONG
+        anchor for judging a return date - see `_return_dates_by_team`.
+        """
         for e in self.bootstrap.get("events", []):
             if int(e["id"]) == int(event):
                 raw = e.get("deadline_time")
@@ -521,6 +526,49 @@ class XPModel:
                     return None
                 return datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
         return None
+
+    def _return_dates_by_team(self, event: int) -> dict[int, date]:
+        """
+        The date each team actually plays in `event`, for judging a return.
+
+        Availability was judged against the gameweek DEADLINE - a Friday - while
+        FPL writes "expected back" dates against a fixture, and a gameweek runs
+        Friday to Monday. Every player whose return fell inside his own
+        gameweek but after the Friday deadline was therefore held out of a match
+        he started.
+
+        That is not a corner case. On the snapshot this was found with, 8 of the
+        11 players carrying a parsed return date lost a whole gameweek to it -
+        Baleba, Garner and Bajcetic were marked unavailable for a GW1 they all
+        played 90 minutes of. The three that escaped did so only because their
+        gameweek happened to have deadline == kickoff.
+
+        Per team rather than one date per gameweek, because players are on
+        different teams and a Saturday lunchtime side is not a Monday night one.
+        A double gameweek takes the LAST kickoff: a player who returns between
+        the two fixtures still features in the gameweek.
+        """
+        fx = self.fixtures
+        if fx.empty or "event" not in fx.columns or "kickoff_time" not in fx.columns:
+            return {}
+        rows = fx[fx["event"] == event]
+        out: dict[int, date] = {}
+        for _, f in rows.iterrows():
+            raw = f.get("kickoff_time")
+            if not raw or raw != raw:                      # missing or NaN
+                continue
+            try:
+                when = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+            except (TypeError, ValueError):
+                continue
+            for side in ("team_h", "team_a"):
+                tid = f.get(side)
+                if tid is None or tid != tid:
+                    continue
+                tid = int(tid)
+                if tid not in out or when > out[tid]:
+                    out[tid] = when
+        return out
 
     def _availability(self, event: int | None = None) -> pd.Series:
         """
@@ -547,6 +595,7 @@ class XPModel:
         when = self._event_date(event)
         if when is None:
             return base
+        kickoffs = self._return_dates_by_team(event)
 
         events = next_events(self.bootstrap, self.config.horizon)
         ahead = events.index(event) if event in events else 0
@@ -577,8 +626,10 @@ class XPModel:
                 info = self.news.get(int(pid))
                 if info is None:
                     continue
+                # His own team's kickoff, not the gameweek deadline.
+                judged = kickoffs.get(int(df["team"].iloc[pos]), when)
                 out.iloc[pos] = news.availability_on(
-                    info, when, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
+                    info, judged, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
                 )
         return out.clip(0.0, 1.0)
 
@@ -603,6 +654,7 @@ class XPModel:
         when = self._event_date(event)
         if when is None:
             return pd.Series(1.0, index=df.index)
+        kickoffs = self._return_dates_by_team(event)
         out = pd.Series(1.0, index=df.index)
         for pos, pid in enumerate(df["id"].astype(int)):
             info = self.news.get(int(pid))
@@ -613,8 +665,11 @@ class XPModel:
             # suspension was damped to 0.55 exactly like a three-month injury.
             # `news_added` is when FPL posted the flag, which is the best
             # available proxy for when the absence began.
+            # His own team's kickoff, for the same reason as in _availability:
+            # the deadline is a Friday and the fixture may be a Monday.
+            judged = kickoffs.get(int(df["team"].iloc[pos]), when)
             out.iloc[pos] = news.ramp_multiplier(
-                info, when, absence_days=self._absence_days(int(pid), info))
+                info, judged, absence_days=self._absence_days(int(pid), info))
         return out
 
     def _normalise_starts_within_team(self, p_start: pd.Series) -> pd.Series:
