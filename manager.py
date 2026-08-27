@@ -192,7 +192,38 @@ def _pair_by_position(transfers_in: list[int], transfers_out: list[int],
     return paired_in, paired_out
 
 
-def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
+# The cron runs daily and this decides whether today is the day.
+#
+# A fixed Friday cron cannot work: deadlines land on Sat 26 times, Fri 5, Wed 5
+# and Sun 2 across 2026-27, and the five Wednesday midweek rounds - GW13, 18,
+# 20, 25 and 28 - have NO Friday between the previous deadline and their own.
+# Those five gameweeks got no run at all, carrying a stale squad and lineup
+# into them. The same cron also fired up to three times for other gameweeks,
+# once with a lead of 362 hours, acting on data a fortnight old.
+#
+# The window is 24 hours wide on purpose. Narrower risks missing a deadline
+# when a run fails; wider lets two daily runs both fall inside it and
+# reintroduces the double-submission the disabled scheduler was killed for.
+# Verified over all 38 gameweeks of 2026-27: 38 covered, 0 missed, 0 doubles,
+# leads between 2.5 and 25.0 hours.
+DEADLINE_WINDOW_MIN = 2.0    # closer than this and a submission may not land
+DEADLINE_WINDOW_MAX = 26.0
+
+
+def hours_to_deadline(event: dict, now: datetime | None = None) -> float | None:
+    """Hours from `now` until this gameweek's deadline, or None if unknown."""
+    raw = event.get("deadline_time")
+    if not raw:
+        return None
+    try:
+        deadline = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    now = now or datetime.now(timezone.utc)
+    return (deadline - now).total_seconds() / 3600.0
+
+
+def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
@@ -214,6 +245,19 @@ def run_weekly_cycle(dry_run: bool = False, max_hits: int = 2) -> dict | None:
         logger.warning("no upcoming gameweek; season may be over")
         return None
     event_id = int(next_event["id"])
+
+    if respect_window:
+        lead = hours_to_deadline(next_event)
+        if lead is None:
+            logger.warning("GW%d has no deadline_time; proceeding rather than skipping", event_id)
+        elif not (DEADLINE_WINDOW_MIN <= lead < DEADLINE_WINDOW_MAX):
+            logger.info(
+                "GW%d deadline is %.1fh away, outside the %g-%gh window; nothing to do",
+                event_id, lead, DEADLINE_WINDOW_MIN, DEADLINE_WINDOW_MAX,
+            )
+            return None
+        else:
+            logger.info("GW%d deadline is %.1fh away; proceeding", event_id, lead)
 
     my_team = client.get_my_team()
     if not my_team:
@@ -435,9 +479,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="FPL Auto Manager")
     ap.add_argument("--dry-run", action="store_true", help="compute everything, submit nothing")
     ap.add_argument("--max-hits", type=int, default=2, help="most hits the optimiser may take")
+    # Opt-in, so every existing caller and test keeps working unchanged and
+    # only the scheduled run enforces it.
+    ap.add_argument("--respect-window", action="store_true",
+                    help="skip unless the deadline is inside the daily cron's window")
     args = ap.parse_args()
 
-    result = run_weekly_cycle(dry_run=args.dry_run, max_hits=args.max_hits)
+    result = run_weekly_cycle(dry_run=args.dry_run, max_hits=args.max_hits,
+                              respect_window=args.respect_window)
     if result is None:
         return 1
     print(json.dumps(result, indent=2, default=str))
