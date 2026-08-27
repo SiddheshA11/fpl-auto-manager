@@ -233,8 +233,54 @@ ownership tilt currently runs on `selected_by_percent`, the 11-million-player
 template, when the field is 19 specific people. Captaincy is where this bites
 hardest.
 
-Blocked until a gameweek completes: `/entry/{id}/event/{gw}/picks/` returns
-nothing before then.
+**UNBLOCKED and half-built.** GW1 completed 24 Aug 2026. `rivals.py` +
+`tests/test_rivals.py` now compute field ownership and captain rates; wiring
+them into the objective is the remaining work.
+
+Two things changed the shape of this job:
+
+**It needs no credentials.** `LeagueAnalyzer` was routed through the
+authenticated client for `get_my_leagues()`, which spends a single-use refresh
+token. `/entry/{id}/` publishes the same league list to anybody, so the whole
+pipeline runs on public endpoints and cannot lock the account out. That removes
+the only real hazard this feature had. `league_analyzer.py` is now redundant
+and should be deleted rather than fixed.
+
+**Global leagues are the template under another name.** "Overall" and "Gameweek
+1" carry 8.9m entries each; treating them as a field would reintroduce the very
+proxy this replaces. `MAX_LEAGUE_SIZE = 2000` keeps the four real mini leagues
+(44 rivals).
+
+Measured live on GW1, field ownership against the `selected_by_percent` the
+tilt currently uses:
+
+```
+  player             field  template      gap  captained
+  Haaland            84.1%     68.0%    +16.1      65.9%
+  João Pedro         81.8%     67.3%    +14.5       9.1%
+  Szoboszlai         68.2%     43.0%    +25.2       0.0%
+  Calafiori          63.6%     41.5%    +22.1       0.0%
+  B.Fernandes        61.4%     48.8%    +12.6      18.2%
+  Kinsky             56.8%     22.9%    +33.9       0.0%
+  Mbeumo             54.5%     36.2%    +18.3       2.3%
+  Calvert-Lewin      45.5%     29.1%    +16.4       0.0%
+```
+
+**The template understates the field for every top-owned player, by 10 to 34
+percentage points.** A mini league clusters far harder than eleven million
+people do, so a tilt aimed at `selected_by_percent` is aimed at the wrong
+target - and it is wrong in a consistent direction, which means it is
+systematically under-tilting.
+
+**Captaincy is a different distribution again, and far more concentrated.**
+João Pedro is owned by 81.8% of the field and captained by 9.1% of it.
+Szoboszlai and Calafiori are owned by two thirds and captained by nobody. Only
+Haaland is genuinely a captaincy block at 65.9%. Squad ownership is not a proxy
+for it, which is what the old plan assumed.
+
+Practical note for the outstanding João Pedro question: the field owns him at
+**81.8%**, not the 67.3% the template reports, so not owning him is a larger
+differential than it looked.
 
 ### 3. Team value and price changes
 
