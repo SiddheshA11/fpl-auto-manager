@@ -354,6 +354,42 @@ for defenders — much smaller than feared.
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
 
+## Audit findings, not yet fixed
+
+### The preview tools read a DIFFERENT availability than the model scores with
+
+`expected_points` builds its output frame with `mm = self.minutes_model()` -
+**no event** (xp_model.py:1103). `_availability(None)` returns the base flag
+and skips everything event-specific: news-date availability
+(`news.availability_on`), doubt decay across the horizon, and card-ban risk.
+The xP itself is fine, because the per-fixture path calls
+`self.minutes_model(event)` (xp_model.py:957).
+
+So `out["availability"]`, `out["p_start"]` and `out["exp_minutes"]` are
+event-less and disagree with the numbers the optimiser actually used.
+
+That is not cosmetic. `deadline_check.py:84` is the pre-deadline safety net:
+
+```python
+flagged = squad[squad["availability"] < BENCH_BELOW_AVAILABILITY]
+```
+
+A player whose news says "out until 15 September" but whose status flag is
+still 'd' reads 0.75 here and is not flagged, while the model scoring the next
+gameweek correctly treats him as 0.0. **The tool that exists to catch an
+unavailable player in the XI is looking at the wrong number.** This is the same
+shape as the `recommend.py` ownership_weight bug: a preview disagreeing with
+the run.
+
+Fix is probably one line - pass the next event into that call - but it changes
+three reported columns and wants a test that pins the preview and the run to
+the same figure, so it was not done blind.
+
+### Confirmed still dead
+
+- `sd_next` (xp_model.py:1143) is produced and consumed by **tests only**.
+- `league_analyzer.LeagueAnalyzer` is imported by **zero** non-test files.
+- `price_change_percent` has no references at all.
 ## Where the minutes error actually is - re-measured on the real model
 
 `measure_minutes_decomp.py`. The first version of this ran before the harness
