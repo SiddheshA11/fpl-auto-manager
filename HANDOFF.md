@@ -62,6 +62,14 @@ Three concrete, unexercised leads, cheapest first:
    from data already on disk. Cheapest thing on this list by a distance.
 2. ~~**Manager change resets a start rate.**~~ **MEASURED, DEAD.** See
    `measure_regime.py` and "the manager-change null" below.
+1. ~~**Yellow-card suspension risk.**~~ **BUILT.** `_suspension_risk` in
+   `xp_model.py`, `measure_suspension.py`, `tests/test_suspension.py`. Read
+   "what the suspension model is and is not" below before extending it - the
+   naive version of this feature is a no-op, and the obvious way to measure it
+   reports a gain that is not real.
+2. **Manager change resets a start rate.** A new manager makes the previous
+   twenty gameweeks of team selection much weaker evidence. Currently the
+   start rate shrinks on a gameweek scale that knows nothing about this.
 3. **Predicted lineups.** The single largest source, and what the paid
    services actually sell. Not in the FPL API, so it means an external feed
    and real fragility. Measure 1 and 2 before deciding this is worth the
@@ -227,6 +235,55 @@ managers and Jurić largely kept the XI.
 measured.** Pooled optimum is 0.75 with zero Brier difference, and the surface
 is flat around it. That is one of the Priority 3 hand-picked constants retired
 permanently.
+### 1a. What the suspension model is, and is not
+
+The obvious version of this feature is a **no-op**, and it is worth knowing why
+before touching it. FPL sets `status='s'` on a banned player and
+`STATUS_AVAILABILITY` maps that to 0.0, so **the gameweek after the fifth card
+is already handled in production** and always was. Modelling it again there
+prices one absence twice.
+
+What no flag can cover is the card that has not been shown yet. Measured over
+2020-26, a starter sitting on exactly four bookings is banned somewhere inside
+a five-gameweek horizon **50.7% of the time** (n=1048), and was priced at full
+minutes for all five. That is roughly 2 xP unpriced on one player, and the
+optimiser makes transfer calls on far less. So the model runs only on
+`ahead >= 1` and leaves the next gameweek to FPL.
+
+Frequency, so the size is not oversold: ~3 affected starters league-wide at
+GW8, 15 at GW12, 30 at GW16, 38 at GW19. Concentrated in the run-up to the
+matchweek-19 cutoff, and worth **0.8% of total squared minutes error** - real,
+cheap, and small. It will not move a backtest R2 and is not meant to.
+
+**Do not measure this with `backtest.py`.** `build_state` hardcodes
+`status='a'` and `chance_of_playing_next_round=None` for every player, so the
+backtest is blind to availability in a way production is not. It would credit
+this model for rediscovering bans the status flag already handles, and report a
+gain that does not exist in production. `simulate.py` cannot help either: the
+effect is worth 5-20 points a season against a ~53-point noise floor.
+
+`measure_suspension.py` measures the claim the model actually makes - a
+probability - held out by season:
+
+```
+  horizon GW       predicted   realised     error
+  1                    0.138      0.158    -0.020
+  2                    0.119      0.109     0.010
+  3                    0.103      0.096     0.006
+  4                    0.088      0.074     0.014
+  5                    0.076      0.069     0.008
+  cumulative           0.524      0.507     0.018
+```
+
+Over-prediction is the safe direction: the model assumes the player is on the
+pitch every gameweek of the horizon, and real players are rested and rotated.
+
+**Known limitation, and it is not in this model.** Goalkeepers barely respond.
+Their group in `_normalise_starts_within_team` has one shirt and
+`GK_COMPETITION_ALPHA = 3.0`, so allocation is on relative standing alone and a
+first-choice keeper's availability cut is destroyed - Pickford and Leno retain
+**0.00** of a 25% cut. That damps every availability signal a keeper gets,
+injury flags included, not just this one. Tracked separately.
 ### 1c. Availability was silently disabled for goalkeepers - FIXED
 
 `_normalise_starts_within_team` divides a fixed number of shirts by relative
@@ -353,6 +410,42 @@ for defenders — much smaller than feared.
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
 
+## Audit findings, not yet fixed
+
+### The preview tools read a DIFFERENT availability than the model scores with
+
+`expected_points` builds its output frame with `mm = self.minutes_model()` -
+**no event** (xp_model.py:1103). `_availability(None)` returns the base flag
+and skips everything event-specific: news-date availability
+(`news.availability_on`), doubt decay across the horizon, and card-ban risk.
+The xP itself is fine, because the per-fixture path calls
+`self.minutes_model(event)` (xp_model.py:957).
+
+So `out["availability"]`, `out["p_start"]` and `out["exp_minutes"]` are
+event-less and disagree with the numbers the optimiser actually used.
+
+That is not cosmetic. `deadline_check.py:84` is the pre-deadline safety net:
+
+```python
+flagged = squad[squad["availability"] < BENCH_BELOW_AVAILABILITY]
+```
+
+A player whose news says "out until 15 September" but whose status flag is
+still 'd' reads 0.75 here and is not flagged, while the model scoring the next
+gameweek correctly treats him as 0.0. **The tool that exists to catch an
+unavailable player in the XI is looking at the wrong number.** This is the same
+shape as the `recommend.py` ownership_weight bug: a preview disagreeing with
+the run.
+
+Fix is probably one line - pass the next event into that call - but it changes
+three reported columns and wants a test that pins the preview and the run to
+the same figure, so it was not done blind.
+
+### Confirmed still dead
+
+- `sd_next` (xp_model.py:1143) is produced and consumed by **tests only**.
+- `league_analyzer.LeagueAnalyzer` is imported by **zero** non-test files.
+- `price_change_percent` has no references at all.
 ## Where the minutes error actually is - re-measured on the real model
 
 `measure_minutes_decomp.py`. The first version of this ran before the harness
