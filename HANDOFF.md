@@ -217,6 +217,46 @@ for defenders — much smaller than feared.
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
 
+## Where the minutes error actually is - re-measured on the real model
+
+`measure_minutes_decomp.py`. The first version of this ran before the harness
+fix below and was therefore on the crippled model; these are the numbers that
+count. Both columns, same run, so the effect of the lags is visible directly:
+
+```
+                          without lags        with lags (production)
+  minutes R2                  0.4742                     0.6085
+  segment              n   share err   bias      share err   bias
+  never plays      10621       0.043   +1.9          0.047   +1.4
+  fringe <30        3915       0.253   -6.8          0.265   -7.1
+  rotation 30-60    3976       0.387   -2.9          0.373   -4.1
+  regular 60-80     2504       0.223   +1.1          0.215   -0.4
+  ever-present 80+  1758       0.094   -3.5          0.100   -1.8
+```
+
+**0.6085 matches the 0.609 this document has always quoted, to three decimals.**
+That figure was never unreproducible - it just needed the lags the harness was
+not passing. An earlier session note in this file claiming otherwise was wrong.
+
+Two things to carry:
+
+**The composition survives.** Every segment's share of squared error moves by
+0.03 or less. Rotation and fringe still carry ~64% of it between them, and
+that is still not where a squad's players live. The ranking of what to work on
+does not change.
+
+**The addressable headroom is smaller than it looked.** Established regulars
+who blank fall from 16.6% of all squared error to **13.9%**, and the model now
+prices them at **49.3 expected minutes rather than 69.9** - the lag view
+already catches much of a player losing his place. Rescaling the split in 1d by
+0.139/0.166 gives roughly 7.9% injury absence, 4.6% unexplained rotation, 0.7%
+card suspensions.
+
+And the headline gap needs restating. Priority 1 sizes the prize as
+`0.440 - 0.271 = +0.169` points R2. Our points R2 is now measured at **0.3093**,
+so the gap to perfect minutes is **0.131**, not 0.169 - and the 0.440 itself was
+measured on the crippled model and is due a re-run before anyone leans on it.
+
 ## The offline harnesses were scoring the wrong model - FIXED
 
 `recent_minutes` was supplied by `manager.py` and nothing else. `backtest.py`
