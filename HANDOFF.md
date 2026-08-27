@@ -179,6 +179,48 @@ same fact seen twice — a single season cannot resolve this:
 way, is the only thing that tells you what your apparatus's noise looks like.
 Both control rows above exist for that reason and both earned their place.
 
+### 1c. Availability was silently disabled for goalkeepers - FIXED
+
+`_normalise_starts_within_team` divides a fixed number of shirts by relative
+standing. That makes it purely relative, so folding availability into the
+weights before allocating meant a dominant first choice barely moved when he
+was flagged - his *share* of the group was unchanged. `rate**3.0` makes every
+settled keeper dominant.
+
+Measured on the committed snapshot, applying a 25% availability cut to each
+first-choice keeper in turn:
+
+```
+  position   n   mean retained   median     min
+  GK        11           0.243    0.070   0.000
+  DEF       24           1.170    1.307   0.492
+  MID       18           1.266    1.314   0.746
+  FWD        2           1.280    1.280   1.235
+```
+
+**Five of eleven retained exactly 0.000**: Pickford, Leno, Verbruggen,
+Henderson and Sels could not be marked down at all. This was never a card-ban
+problem - it disabled *every* availability signal those players could receive:
+injury flags, `chance_of_playing_next_round`, news decay, the lot. Outfielders
+had the opposite, milder fault, over-applying a cut at 1.17-1.28.
+
+Fix: allocate shirts on ability, scale each player by his own availability,
+hand the freed shirts to team-mates who can play. After: GK 0.974, everyone
+else 0.994-0.996.
+
+**Two obvious shortcuts are wrong and both were tried here first.** Sharing the
+freed mass by remaining *headroom* favours the deputy, since he is furthest
+below his ceiling - a first choice whose understudy carried a 75% flag finished
+worse off than if the understudy were fit (United's keeper fell 0.902 to 0.807
+for no reason). Sharing it by *standing* hands it straight back to the player
+who released it, so the flag does nothing again. It has to go to the others,
+weighted by their availability-weighted standing.
+
+Impact on the live snapshot: 316 of 590 players move, mean |change| 0.020 xP
+over the horizon, max 0.678, and the **top 30 by horizon xP are unchanged**.
+Doubtful outfielders correctly rise (the old code over-penalised them);
+flagged first-choice keepers correctly fall.
+
 ### 2. Rank-aware objective
 
 The optimiser maximises expected points. The goal is winning a ~20-person

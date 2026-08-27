@@ -211,7 +211,7 @@ def test_start_probability_normalised_to_eleven_shirts():
     })
     m = _model(players)
     raw = pd.Series([0.9, 0.6, 0.5, 0.4] + [0.8] * 12)
-    out = m._normalise_starts_within_team(raw)
+    out = m._normalise_starts_within_team(raw, pd.Series([1.0] * len(raw)))
 
     gk = out[players["position"] == 1]
     outfield = out[players["position"] != 1]
@@ -228,16 +228,24 @@ def test_clear_first_choice_keeper_is_not_diluted_by_backups():
     """
     players = pd.DataFrame({"team": [1, 1, 1], "position": [1, 1, 1]})
     m = _model(players)
-    out = m._normalise_starts_within_team(pd.Series([0.87, 0.32, 0.15]))
+    out = m._normalise_starts_within_team(pd.Series([0.87, 0.32, 0.15]),
+                                          pd.Series([1.0, 1.0, 1.0]))
     assert out.iloc[0] > 0.85, "clear first choice should stay near-certain"
     assert out.iloc[1] < 0.12
 
 
 def test_injured_first_choice_promotes_the_understudy():
-    """Availability of zero must hand the shirt to the backup, not vanish."""
+    """
+    Availability of zero must hand the shirt to the backup, not vanish.
+
+    Availability is now passed separately rather than pre-multiplied into the
+    rate, so this states what it always meant: the first choice is the better
+    keeper and is unavailable, not a keeper who is simply useless.
+    """
     players = pd.DataFrame({"team": [1, 1], "position": [1, 1]})
     m = _model(players)
-    out = m._normalise_starts_within_team(pd.Series([0.0, 0.20]))
+    out = m._normalise_starts_within_team(pd.Series([0.85, 0.20]),
+                                          pd.Series([0.0, 1.0]))
     assert out.iloc[0] == 0.0
     assert out.iloc[1] > 0.9
 
