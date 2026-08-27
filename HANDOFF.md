@@ -187,6 +187,112 @@ same fact seen twice — a single season cannot resolve this:
 way, is the only thing that tells you what your apparatus's noise looks like.
 Both control rows above exist for that reason and both earned their place.
 
+### 1d. The minutes analysis, done properly
+
+Everything above about minutes was measured on a model running **blind to
+availability**. `backtest.py`'s `build_state` hardcodes `status='a'` and
+`chance_of_playing_next_round=None` for every player, and `_ramp` only fires
+when live news exists, so the backtest exercises neither injuries nor returns.
+The headline minutes R2 of 0.474 is therefore a floor on a handicapped model,
+not an estimate of production, and **9.5% of all squared minutes error is
+injury absence that production sees and the backtest cannot**.
+
+Per-gameweek availability is not reconstructible: `players_raw.csv` carries
+`status`, `chance_of_playing_*` and `news`, but it is an end-of-season snapshot,
+so it describes May and nothing else. The absence itself is observable though -
+a run of zero-minute gameweeks - and that is enough for the two questions that
+matter.
+
+#### Returning from an absence: RAMP_UP is the wrong shape
+
+`measure_ramp.py`. Production assumes `RAMP_UP = [0.55, 0.80]` then full, and
+`LONG_ABSENCE_DAYS = 28` means anything under about four gameweeks gets no ramp
+at all. Measured over six seasons, minutes on return as a ratio to the player's
+own pre-absence average, **divided by a control of non-absent starters over the
+same relative window**:
+
+```
+  absence          +1       +2       +3       +4
+  1 GW          0.868    0.873    0.903    0.915
+  2 GW          0.796    0.824    0.859    0.919
+  3 GW          0.806    0.845    0.913    0.934
+  4-5 GW        0.715    0.823    0.837    0.880
+  6-8 GW        0.646    0.735    0.787    0.750
+  9+ GW         0.602    0.719    0.826    0.736
+```
+
+**The control earns its place here.** Raw ratios look far more dramatic, because
+minutes decay against a trailing five-gameweek baseline anyway - the control
+runs 1.017, 0.920, 0.877, 0.848 with no absence at all. Most of the apparent
+"ramp" in the raw numbers is regression to the mean.
+
+Two errors in the current model, in opposite directions:
+
+- **too harsh at +1**: 0.55 assumed against 0.60-0.72 measured, even for the
+  longest absences.
+- **far too generous from +3**: production returns to full, while a player back
+  from 6+ gameweeks out is still at 0.75-0.83 in his third and fourth games.
+  The ramp is **shallower but much longer** than modelled.
+
+The gradient in absence length is also real and unmodelled - +1 runs from 0.868
+after one week out to 0.602 after nine. A single `RAMP_UP` pair cannot express
+it; the replacement is a 2-D table keyed on (absence length, weeks back).
+
+Caveat that limits how far the short bands can be pushed: a run of zero-minute
+gameweeks conflates injury with being dropped, and for 1-3 gameweek gaps most
+are selection, not fitness. That is what the 28-day gate exists for, and those
+rows are **not** an argument for ramping short absences - a dropped player's
+minutes belong to the start-rate model. The evidence is clean for 4+ gameweeks.
+
+#### International duty: measured, NULL
+
+`measure_international.py`. Breaks are unlabelled but visible in the fixture
+calendar as a fortnight between gameweeks instead of a week. Established
+starters, compared within-player against their own trailing average:
+
+```
+                            n   mean minutes   ratio to base   P(blank)
+  gameweek after break   3795           73.4           0.892      0.132
+  CONTROL: ordinary GW  23844           74.3           0.899      0.113
+
+  difference -0.0077   SE 0.0081   t = -0.95   (-0.88 minutes per starter)
+```
+
+Nothing there in aggregate. The split is now possible: `region` is an
+alphabetical country index, and the ids in `measure_international.py` were each
+confirmed by reading off a player whose nationality is not in doubt. Two early
+probes matched the wrong player - region 21 resolves to Belgium via Amadou
+Onana, not Cote d'Ivoire, and a search for "Erling" matched "Sterling" - so
+every id is one checked by name. `region` appears only from 2024-25, but
+nationality is static, so the map is built on `code` and applied backward.
+
+```
+  band                n after   ratio   n ctrl   ratio     diff       t
+  CAF                     213   0.834     1366   0.913   -0.079   -2.24
+  CONMEBOL                387   0.912     2620   0.913   -0.002   -0.07
+  UEFA other             1250   0.908     8556   0.901   +0.008   +0.57
+  far AFC/CONCACAF        105   0.957      595   0.894   +0.063   +1.37
+  home nations           1204   0.900     7427   0.904   -0.005   -0.32
+```
+
+Only CAF moves, and the AFCON window says the same thing: CAF players in
+January run 0.848 against 0.949 for UEFA, a difference of -0.077 (t = -1.95)
+against a control of +0.008 for the same pairing outside January -
+difference-in-differences **-0.085**.
+
+**Do not ship this yet.** Two reasons. First, that is five bands times two
+questions, and |t| of 2.24 and 1.95 does not survive a correction for ten
+comparisons - Bonferroni wants 2.8. AFCON is at least a pre-specified
+hypothesis rather than a fishing expedition, which is the only thing keeping it
+alive. Second, CONMEBOL coming out at **exactly zero** is a problem for the
+story: if the mechanism were long-haul travel, South America should be the
+worst band, and it is flat. That points at AFCON the tournament rather than
+flying as such, which is a narrower and more seasonal effect than "international
+duty".
+
+Impact on the current squad if it were shipped today: **none**. The GW1-5
+horizon has gaps of 6-7 days throughout, no international break and no January,
+so every multiplier would be 1.0.
 ### 1b. Manager-change start-rate reweighting - measured, DEAD
 
 `measure_regime.py`. The lead was that a new manager makes the previous twenty
