@@ -317,6 +317,65 @@ def _allocate_shirts(weights: pd.Series, shirts: float, cap: float = 0.98) -> pd
     return out.where(eligible, 0.0)
 
 
+def _redistribute_unavailable(
+    pecking: pd.Series, avail: pd.Series, shirts: float, cap: float = 0.98
+) -> pd.Series:
+    """
+    Scale a pecking order by availability, then hand the freed shirts on.
+
+    `pecking` is the allocation a fully fit squad would produce and already
+    sums to `shirts`. Multiplying by availability takes mass out of the team
+    total, and a shirt taken off an injured player is still a shirt somebody
+    plays in - the same leak `_allocate_shirts` exists to stop, arriving by a
+    different route.
+
+    The rule that matters: mass released by a player goes to the OTHERS, in
+    proportion to their own availability-weighted standing. Both of the obvious
+    shortcuts are wrong, and both were tried here first:
+
+    - sharing it by remaining headroom favours the deputy, because he is the
+      one furthest below his ceiling. A first choice whose understudy carried a
+      75% flag then finished *worse off* than if the understudy were fit -
+      United's keeper fell 0.902 to 0.807 for no reason at all.
+    - sharing it by standing hands it straight back to the player who released
+      it, since he has the highest standing. A flagged first-choice keeper
+      recovered his own mass and the flag did nothing, which is the bug this
+      whole function exists to fix.
+
+    Excluding the donor is what makes a 75%-fit first choice land near 0.75 of
+    his fit probability with the remainder going to his deputy, which is what
+    those two numbers are supposed to mean.
+    """
+    kept = (pecking * avail).clip(lower=0.0)
+    released = (pecking * (1.0 - avail)).clip(lower=0.0)
+    ceiling = pd.Series(np.minimum(cap, avail.to_numpy()), index=avail.index)
+
+    total = float(kept.sum())
+    if released.sum() > 1e-12 and total > 1e-12:
+        # gain_j = w_j * sum over donors i != j of released_i / (total - w_i)
+        denom = (total - kept).clip(lower=1e-12)
+        per_donor = released / denom
+        gain = kept * (float(per_donor.sum()) - per_donor)
+        out = kept + gain
+    else:
+        out = kept
+
+    # Ceilings can be breached by the hand-on, and filling the last of the
+    # shirts can breach a second player's, so settle it iteratively. Bounded:
+    # a squad whose ceilings sum below `shirts` genuinely cannot fill them.
+    for _ in range(8):
+        out = pd.Series(np.minimum(out.to_numpy(), ceiling.to_numpy()), index=out.index)
+        deficit = shirts - float(out.sum())
+        if deficit <= 1e-9:
+            break
+        room = (ceiling - out).clip(lower=0.0)
+        total_room = float(room.sum())
+        if total_room <= 1e-12:
+            break
+        out = out + room * min(1.0, deficit / total_room)
+    return out.clip(lower=0.0)
+
+
 class XPModel:
     """Expected points for every player over a horizon of gameweeks."""
 
@@ -532,7 +591,12 @@ class XPModel:
     # ---------- minutes ----------
 
     def _event_date(self, event: int) -> date | None:
-        """The deadline date of a gameweek - when availability is judged."""
+        """
+        The deadline date of a gameweek.
+
+        Kept for callers that genuinely want the deadline. It is the WRONG
+        anchor for judging a return date - see `_return_dates_by_team`.
+        """
         for e in self.bootstrap.get("events", []):
             if int(e["id"]) == int(event):
                 raw = e.get("deadline_time")
@@ -617,6 +681,48 @@ class XPModel:
             cdf = cdf + term.where(need > k, 0.0)
         out = (1.0 - cdf).clip(0.0, 1.0)
         return out.where(lam > 0, 0.0)
+    def _return_dates_by_team(self, event: int) -> dict[int, date]:
+        """
+        The date each team actually plays in `event`, for judging a return.
+
+        Availability was judged against the gameweek DEADLINE - a Friday - while
+        FPL writes "expected back" dates against a fixture, and a gameweek runs
+        Friday to Monday. Every player whose return fell inside his own
+        gameweek but after the Friday deadline was therefore held out of a match
+        he started.
+
+        That is not a corner case. On the snapshot this was found with, 8 of the
+        11 players carrying a parsed return date lost a whole gameweek to it -
+        Baleba, Garner and Bajcetic were marked unavailable for a GW1 they all
+        played 90 minutes of. The three that escaped did so only because their
+        gameweek happened to have deadline == kickoff.
+
+        Per team rather than one date per gameweek, because players are on
+        different teams and a Saturday lunchtime side is not a Monday night one.
+        A double gameweek takes the LAST kickoff: a player who returns between
+        the two fixtures still features in the gameweek.
+        """
+        fx = self.fixtures
+        if fx.empty or "event" not in fx.columns or "kickoff_time" not in fx.columns:
+            return {}
+        rows = fx[fx["event"] == event]
+        out: dict[int, date] = {}
+        for _, f in rows.iterrows():
+            raw = f.get("kickoff_time")
+            if not raw or raw != raw:                      # missing or NaN
+                continue
+            try:
+                when = datetime.fromisoformat(str(raw).replace("Z", "+00:00")).date()
+            except (TypeError, ValueError):
+                continue
+            for side in ("team_h", "team_a"):
+                tid = f.get(side)
+                if tid is None or tid != tid:
+                    continue
+                tid = int(tid)
+                if tid not in out or when > out[tid]:
+                    out[tid] = when
+        return out
 
     def _availability(self, event: int | None = None) -> pd.Series:
         """
@@ -643,6 +749,7 @@ class XPModel:
         when = self._event_date(event)
         if when is None:
             return base
+        kickoffs = self._return_dates_by_team(event)
 
         events = next_events(self.bootstrap, self.config.horizon)
         ahead = events.index(event) if event in events else 0
@@ -673,8 +780,10 @@ class XPModel:
                 info = self.news.get(int(pid))
                 if info is None:
                     continue
+                # His own team's kickoff, not the gameweek deadline.
+                judged = kickoffs.get(int(df["team"].iloc[pos]), when)
                 out.iloc[pos] = news.availability_on(
-                    info, when, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
+                    info, judged, base=float(out.iloc[pos]), status=str(df["status"].iloc[pos]),
                 )
 
         # An unearned card ban, applied last because the news loop assigns to
@@ -708,6 +817,7 @@ class XPModel:
         when = self._event_date(event)
         if when is None:
             return pd.Series(1.0, index=df.index)
+        kickoffs = self._return_dates_by_team(event)
         out = pd.Series(1.0, index=df.index)
         for pos, pid in enumerate(df["id"].astype(int)):
             info = self.news.get(int(pid))
@@ -718,20 +828,23 @@ class XPModel:
             # suspension was damped to 0.55 exactly like a three-month injury.
             # `news_added` is when FPL posted the flag, which is the best
             # available proxy for when the absence began.
+            # His own team's kickoff, for the same reason as in _availability:
+            # the deadline is a Friday and the fixture may be a Monday.
+            judged = kickoffs.get(int(df["team"].iloc[pos]), when)
             out.iloc[pos] = news.ramp_multiplier(
-                info, when, absence_days=self._absence_days(int(pid), info))
+                info, judged, absence_days=self._absence_days(int(pid), info))
         return out
 
-    def _normalise_starts_within_team(self, p_start: pd.Series) -> pd.Series:
+    def _normalise_starts_within_team(
+        self, start_rate: pd.Series, avail: pd.Series
+    ) -> pd.Series:
         """
         Force each team's start probabilities to sum to the eleven shirts that
         actually exist: one goalkeeper and ten outfielders.
 
         Without this, start probability is estimated per player in isolation and
         nothing stops a club's two £5.0 keepers from both being 68% likely to
-        start. It also produces the right behaviour when a first choice is
-        injured: his probability drops to zero and the freed mass is
-        redistributed to the understudy, who becomes a near-certain starter.
+        start.
 
         Allocation within a group is proportional to rate**alpha rather than to
         the rate itself. Straight proportional scaling punishes a settled first
@@ -741,9 +854,34 @@ class XPModel:
         probability on the likeliest starter. Goalkeeper is close to a binary
         contest so it gets the sharper exponent; outfield rotation is real, so
         it gets a gentler one.
+
+        Availability is applied AFTER the pecking order rather than folded into
+        the weights, and that ordering is the whole point of this rewrite.
+        Allocation is purely relative: it divides a fixed number of shirts by
+        relative standing, so scaling one player's weight down changes only his
+        share. For a dominant first choice - and `rate**3.0` makes every settled
+        keeper dominant - the share barely moves and the cut is destroyed.
+        Measured on the committed snapshot, a 25% availability cut applied to
+        each first-choice keeper in turn was retained at a mean of 0.243, and
+        **five of eleven retained exactly 0.000**: Pickford, Leno, Verbruggen,
+        Henderson and Sels were all completely immune to being flagged. That
+        silently disabled every availability signal a keeper can receive -
+        injury flags, chance_of_playing, news decay and card bans alike.
+
+        So: allocate shirts on ability, scale each player by his own
+        availability, then redistribute the freed mass to team-mates who can
+        actually play. A 75%-fit first choice now lands near 0.75 of his fit
+        probability and his deputy picks up the rest, which is what those two
+        numbers are supposed to mean.
+
+        The behaviour the old ordering got right is preserved: a player at zero
+        availability is dropped from the pecking order outright, so his shirt
+        goes to the understudy rather than being shared back to him.
         """
         df = self.players
-        out = p_start.copy().astype(float)
+        out = pd.Series(0.0, index=start_rate.index, dtype=float)
+        rate = start_rate.clip(lower=0.0).fillna(0.0)
+        av = avail.clip(0.0, 1.0).fillna(0.0)
 
         for team_id, idx in df.groupby("team").groups.items():
             for shirts, alpha, mask in (
@@ -753,16 +891,18 @@ class XPModel:
                 sel = pd.Index(idx)[mask.to_numpy()]
                 if len(sel) == 0:
                     continue
-                raw = out.loc[sel].clip(lower=0.0)
-                weights = raw**alpha
-                total = float(weights.sum())
-                if total <= 1e-12:
+                r, a = rate.loc[sel], av.loc[sel]
+                # Anyone certain to miss is out of the contest entirely, so his
+                # shirt is handed on instead of shared back to him.
+                weights = (r**alpha).where(a > 0.0, 0.0)
+                if float(weights.sum()) <= 1e-12:
                     # Whole group unavailable (or no data): spread evenly rather
                     # than divide by zero. Rare, and self-corrects once FPL
                     # publishes availability.
                     out.loc[sel] = min(shirts / len(sel), 1.0)
                     continue
-                out.loc[sel] = _allocate_shirts(weights, shirts)
+                pecking = _allocate_shirts(weights, shirts)
+                out.loc[sel] = _redistribute_unavailable(pecking, a, shirts)
 
         return out.clip(0.0, 1.0)
 
@@ -781,8 +921,7 @@ class XPModel:
         avail = self._availability(event)
         start_rate = (df["start_rate"].clip(0.0, 1.0).fillna(0.0) * self._ramp(event))
 
-        p_start = avail * start_rate
-        p_start = self._normalise_starts_within_team(p_start)
+        p_start = self._normalise_starts_within_team(start_rate, avail)
 
         # Substitute appearances, conditional on the player's actual standing in
         # the side rather than a flat share.
