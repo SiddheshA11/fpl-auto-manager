@@ -285,6 +285,47 @@ duty".
 Impact on the current squad if it were shipped today: **none**. The GW1-5
 horizon has gaps of 6-7 days throughout, no international break and no January,
 so every multiplier would be 1.0.
+### 1c. Availability was silently disabled for goalkeepers - FIXED
+
+`_normalise_starts_within_team` divides a fixed number of shirts by relative
+standing. That makes it purely relative, so folding availability into the
+weights before allocating meant a dominant first choice barely moved when he
+was flagged - his *share* of the group was unchanged. `rate**3.0` makes every
+settled keeper dominant.
+
+Measured on the committed snapshot, applying a 25% availability cut to each
+first-choice keeper in turn:
+
+```
+  position   n   mean retained   median     min
+  GK        11           0.243    0.070   0.000
+  DEF       24           1.170    1.307   0.492
+  MID       18           1.266    1.314   0.746
+  FWD        2           1.280    1.280   1.235
+```
+
+**Five of eleven retained exactly 0.000**: Pickford, Leno, Verbruggen,
+Henderson and Sels could not be marked down at all. This was never a card-ban
+problem - it disabled *every* availability signal those players could receive:
+injury flags, `chance_of_playing_next_round`, news decay, the lot. Outfielders
+had the opposite, milder fault, over-applying a cut at 1.17-1.28.
+
+Fix: allocate shirts on ability, scale each player by his own availability,
+hand the freed shirts to team-mates who can play. After: GK 0.974, everyone
+else 0.994-0.996.
+
+**Two obvious shortcuts are wrong and both were tried here first.** Sharing the
+freed mass by remaining *headroom* favours the deputy, since he is furthest
+below his ceiling - a first choice whose understudy carried a 75% flag finished
+worse off than if the understudy were fit (United's keeper fell 0.902 to 0.807
+for no reason). Sharing it by *standing* hands it straight back to the player
+who released it, so the flag does nothing again. It has to go to the others,
+weighted by their availability-weighted standing.
+
+Impact on the live snapshot: 316 of 590 players move, mean |change| 0.020 xP
+over the horizon, max 0.678, and the **top 30 by horizon xP are unchanged**.
+Doubtful outfielders correctly rise (the old code over-penalised them);
+flagged first-choice keepers correctly fall.
 
 ### 2. Rank-aware objective
 
@@ -298,8 +339,54 @@ ownership tilt currently runs on `selected_by_percent`, the 11-million-player
 template, when the field is 19 specific people. Captaincy is where this bites
 hardest.
 
-Blocked until a gameweek completes: `/entry/{id}/event/{gw}/picks/` returns
-nothing before then.
+**UNBLOCKED and half-built.** GW1 completed 24 Aug 2026. `rivals.py` +
+`tests/test_rivals.py` now compute field ownership and captain rates; wiring
+them into the objective is the remaining work.
+
+Two things changed the shape of this job:
+
+**It needs no credentials.** `LeagueAnalyzer` was routed through the
+authenticated client for `get_my_leagues()`, which spends a single-use refresh
+token. `/entry/{id}/` publishes the same league list to anybody, so the whole
+pipeline runs on public endpoints and cannot lock the account out. That removes
+the only real hazard this feature had. `league_analyzer.py` is now redundant
+and should be deleted rather than fixed.
+
+**Global leagues are the template under another name.** "Overall" and "Gameweek
+1" carry 8.9m entries each; treating them as a field would reintroduce the very
+proxy this replaces. `MAX_LEAGUE_SIZE = 2000` keeps the four real mini leagues
+(44 rivals).
+
+Measured live on GW1, field ownership against the `selected_by_percent` the
+tilt currently uses:
+
+```
+  player             field  template      gap  captained
+  Haaland            84.1%     68.0%    +16.1      65.9%
+  João Pedro         81.8%     67.3%    +14.5       9.1%
+  Szoboszlai         68.2%     43.0%    +25.2       0.0%
+  Calafiori          63.6%     41.5%    +22.1       0.0%
+  B.Fernandes        61.4%     48.8%    +12.6      18.2%
+  Kinsky             56.8%     22.9%    +33.9       0.0%
+  Mbeumo             54.5%     36.2%    +18.3       2.3%
+  Calvert-Lewin      45.5%     29.1%    +16.4       0.0%
+```
+
+**The template understates the field for every top-owned player, by 10 to 34
+percentage points.** A mini league clusters far harder than eleven million
+people do, so a tilt aimed at `selected_by_percent` is aimed at the wrong
+target - and it is wrong in a consistent direction, which means it is
+systematically under-tilting.
+
+**Captaincy is a different distribution again, and far more concentrated.**
+João Pedro is owned by 81.8% of the field and captained by 9.1% of it.
+Szoboszlai and Calafiori are owned by two thirds and captained by nobody. Only
+Haaland is genuinely a captaincy block at 65.9%. Squad ownership is not a proxy
+for it, which is what the old plan assumed.
+
+Practical note for the outstanding João Pedro question: the field owns him at
+**81.8%**, not the 67.3% the template reports, so not owning him is a larger
+differential than it looked.
 
 ### 3. Team value and price changes
 
@@ -323,6 +410,80 @@ for defenders — much smaller than feared.
 `sd_next` exists and is calibrated overall (ratio 1.000), but per-bucket ratios
 run 0.82-1.32. Good enough to rank players by volatility; not yet good enough
 to price a tail.
+
+## Where the minutes error actually is - re-measured on the real model
+
+`measure_minutes_decomp.py`. The first version of this ran before the harness
+fix below and was therefore on the crippled model; these are the numbers that
+count. Both columns, same run, so the effect of the lags is visible directly:
+
+```
+                          without lags        with lags (production)
+  minutes R2                  0.4742                     0.6085
+  segment              n   share err   bias      share err   bias
+  never plays      10621       0.043   +1.9          0.047   +1.4
+  fringe <30        3915       0.253   -6.8          0.265   -7.1
+  rotation 30-60    3976       0.387   -2.9          0.373   -4.1
+  regular 60-80     2504       0.223   +1.1          0.215   -0.4
+  ever-present 80+  1758       0.094   -3.5          0.100   -1.8
+```
+
+**0.6085 matches the 0.609 this document has always quoted, to three decimals.**
+That figure was never unreproducible - it just needed the lags the harness was
+not passing. An earlier session note in this file claiming otherwise was wrong.
+
+Two things to carry:
+
+**The composition survives.** Every segment's share of squared error moves by
+0.03 or less. Rotation and fringe still carry ~64% of it between them, and
+that is still not where a squad's players live. The ranking of what to work on
+does not change.
+
+**The addressable headroom is smaller than it looked.** Established regulars
+who blank fall from 16.6% of all squared error to **13.9%**, and the model now
+prices them at **49.3 expected minutes rather than 69.9** - the lag view
+already catches much of a player losing his place. Rescaling the split in 1d by
+0.139/0.166 gives roughly 7.9% injury absence, 4.6% unexplained rotation, 0.7%
+card suspensions.
+
+And the headline gap needs restating. Priority 1 sizes the prize as
+`0.440 - 0.271 = +0.169` points R2. Our points R2 is now measured at **0.3093**,
+so the gap to perfect minutes is **0.131**, not 0.169 - and the 0.440 itself was
+measured on the crippled model and is due a re-run before anyone leans on it.
+
+## The offline harnesses were scoring the wrong model - FIXED
+
+`recent_minutes` was supplied by `manager.py` and nothing else. `backtest.py`
+and `simulate.py` both built `XPModel` without it, so `_blend_recent_minutes`
+returned at its first line and the start rate was never touched. **Every
+offline measurement in this repo evaluated a model missing the input this
+document credits with the largest single improvement ever made.**
+
+Measured on 2025-26 GW10-38, same priors both sides:
+
+```
+                          MAE     RMSE       R2
+  without recent_minutes  1.0615  2.0494   0.2570
+  with recent_minutes     0.9791  1.9757   0.3093
+                                          +0.052
+```
+
+The claim in the state table - "moved R2 from 0.269 to 0.319", a gain of 0.050
+- reproduces at **+0.052**. Absolute levels sit ~0.01 lower because local disk
+builds priors from six usable seasons; the *gain* is the reproducible part. So
+the figure was always real, and `backtest.py` was understating the model by
+0.05 R2 while reporting it.
+
+Consequences worth carrying forward:
+
+- Any measurement taken before this landed was on the crippled model. That
+  includes the minutes decomposition in 1d - its **level** is wrong, though the
+  compositional split should survive. Re-run before quoting the number.
+- A regression in `_blend_recent_minutes` was invisible to every offline tool
+  in the repo. `tests/test_offline_recent_minutes.py` now records what
+  `run_backtest` actually hands the model, through a real call.
+- The optimiser-constant sweeps in Priority 3 were measured on a model missing
+  its dominant input and are worth nothing until re-run.
 
 ## Things that will bite you
 

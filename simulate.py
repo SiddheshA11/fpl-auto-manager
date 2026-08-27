@@ -42,7 +42,7 @@ import pandas as pd
 
 import priors
 import xp_model as X
-from backtest import HISTORY_DIR, _scoring_config, build_state
+from backtest import HISTORY_DIR, _scoring_config, build_state, recent_minutes_for
 from optimizer import SQUAD_SIZE, SquadOptimizer
 
 logger = logging.getLogger("fpl_auto.simulate")
@@ -204,7 +204,8 @@ def simulate_season(
             continue
         state = build_state(gw_df, raw_df, teams_df, gw, game_config)
         events = [g for g in range(gw, min(gw + horizon, 39))]
-        model = X.XPModel(state, fixtures, prior_set, X.ModelConfig(horizon=horizon))
+        model = X.XPModel(state, fixtures, prior_set, X.ModelConfig(horizon=horizon),
+                          recent_minutes=recent_minutes_for(gw_df, gw))
         scored = model.expected_points(events)
 
         last_price.update(_prices(gw_df, gw))

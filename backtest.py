@@ -137,6 +137,45 @@ def build_state(
     return {"elements": elements, "events": events, "teams": teams, "game_config": game_config}
 
 
+def recent_minutes_for(gw_df: pd.DataFrame, upto_gw: int, depth: int = 5) -> dict[int, list[float]]:
+    """
+    Minutes each player logged in the `depth` gameweeks before `upto_gw`, most
+    recent first - the offline equivalent of `FPLClient.get_recent_minutes`.
+
+    This was missing entirely, and it is not a small omission: `manager.py` is
+    the only caller that ever supplied `recent_minutes`, so `backtest.py` and
+    `simulate.py` both scored a model with `_blend_recent_minutes` returning at
+    its first line. Every offline measurement in the repo therefore evaluated a
+    model without the input HANDOFF credits with the largest single improvement
+    ever made, and `python backtest.py --season 2025-26` could not reproduce the
+    R2 0.319 it quotes.
+
+    Two details have to match the live client or the backtest measures a
+    different model again:
+
+    - the live endpoint returns a row for every player, so someone who did not
+      feature scores a real 0.0 rather than being absent. A missing row here
+      means the same thing and must become 0.0, not be skipped - dropping it
+      would shorten that player's window and quietly reweight the lag average.
+    - a double gameweek is one entry, summed, because the model's window is in
+      gameweeks and not in fixtures.
+    """
+    if upto_gw <= 1:
+        return {}
+    window = [gw for gw in range(upto_gw - 1, max(0, upto_gw - 1 - depth), -1)]
+    if not window:
+        return {}
+
+    played = gw_df[gw_df["GW"].isin(window)]
+    # sum within a gameweek (doubles), then a dense element x gameweek grid so
+    # a non-appearance is 0.0 rather than a hole
+    grid = (played.groupby(["element", "GW"])["minutes"].sum()
+                  .unstack("GW")
+                  .reindex(columns=window)
+                  .fillna(0.0))
+    return {int(pid): [float(v) for v in row] for pid, row in grid.iterrows()}
+
+
 def run_backtest(season: str, start_gw: int, end_gw: int, horizon: int = 1) -> pd.DataFrame:
     season_dir = HISTORY_DIR / season
     gw_df = priors.read_season_csv(season_dir / "merged_gw.csv")
@@ -169,7 +208,8 @@ def run_backtest(season: str, start_gw: int, end_gw: int, horizon: int = 1) -> p
         actual = gw_rows.groupby("element", as_index=False).agg(agg)
 
         state = build_state(gw_df, raw_df, teams_df, gw, game_config)
-        model = X.XPModel(state, fixtures, prior_set, X.ModelConfig(horizon=horizon))
+        model = X.XPModel(state, fixtures, prior_set, X.ModelConfig(horizon=horizon),
+                          recent_minutes=recent_minutes_for(gw_df, gw))
         pred = model.expected_points([gw])[["id", "xp_next", "cost", "position"]]
 
         merged = actual.merge(pred, left_on="element", right_on="id", how="inner")
