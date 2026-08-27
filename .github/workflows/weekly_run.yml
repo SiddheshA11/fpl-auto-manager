@@ -72,10 +72,17 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
+          # --respect-window only on the schedule. The cron fires daily and
+          # manager.py decides whether today is the day; a manual dispatch is a
+          # deliberate act and must run whenever it is asked to.
+          WINDOW=""
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            WINDOW="--respect-window"
+          fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            python manager.py --dry-run
+            python manager.py --dry-run $WINDOW
           else
-            python manager.py
+            python manager.py $WINDOW
           fi
 
       - name: Upload logs

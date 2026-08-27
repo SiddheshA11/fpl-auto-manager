@@ -223,7 +223,7 @@ def hours_to_deadline(event: dict, now: datetime | None = None) -> float | None:
     return (deadline - now).total_seconds() / 3600.0
 
 
-def run_weekly_cycle(dry_run: bool = False, ignore_window: bool = False, max_hits: int = 2) -> dict | None:
+def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
@@ -246,7 +246,7 @@ def run_weekly_cycle(dry_run: bool = False, ignore_window: bool = False, max_hit
         return None
     event_id = int(next_event["id"])
 
-    if not ignore_window:
+    if respect_window:
         lead = hours_to_deadline(next_event)
         if lead is None:
             logger.warning("GW%d has no deadline_time; proceeding rather than skipping", event_id)
@@ -479,12 +479,14 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="FPL Auto Manager")
     ap.add_argument("--dry-run", action="store_true", help="compute everything, submit nothing")
     ap.add_argument("--max-hits", type=int, default=2, help="most hits the optimiser may take")
-    ap.add_argument("--ignore-window", action="store_true",
-                    help="run even if the deadline is not within the daily cron's window")
+    # Opt-in, so every existing caller and test keeps working unchanged and
+    # only the scheduled run enforces it.
+    ap.add_argument("--respect-window", action="store_true",
+                    help="skip unless the deadline is inside the daily cron's window")
     args = ap.parse_args()
 
     result = run_weekly_cycle(dry_run=args.dry_run, max_hits=args.max_hits,
-                              ignore_window=args.ignore_window)
+                              respect_window=args.respect_window)
     if result is None:
         return 1
     print(json.dumps(result, indent=2, default=str))
