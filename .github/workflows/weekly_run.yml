@@ -1,10 +1,17 @@
 name: FPL Auto Manager - Weekly Run
 
 on:
-  # Fallback cron: every Friday at 10:00 UTC (~24h before most Saturday deadlines)
-  # Primary trigger is still dynamic via scheduler.yml
+  # Daily at 10:00 UTC. manager.py decides whether today is the day by checking
+  # the real deadline - see DEADLINE_WINDOW_MIN/MAX.
+  #
+  # This was '0 10 * * 5'. Deadlines are not weekly: across 2026-27 they fall on
+  # Sat 26 times, Fri 5, Wed 5 and Sun 2, and the five Wednesday midweek rounds
+  # (GW13, 18, 20, 25, 28) have no Friday between the previous deadline and
+  # their own - so those five gameweeks got NO run at all and would have gone in
+  # with a stale squad and lineup. Other gameweeks fired up to three times, once
+  # with a lead of 362 hours.
   schedule:
-    - cron: '0 10 * * 5'
+    - cron: '0 10 * * *'
   # Manual trigger still available for testing
   workflow_dispatch:
     inputs:

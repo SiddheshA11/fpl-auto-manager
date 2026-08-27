@@ -626,6 +626,31 @@ Consequences worth carrying forward:
 - The optimiser-constant sweeps in Priority 3 were measured on a model missing
   its dominant input and are worth nothing until re-run.
 
+## The cron missed five gameweeks a season - FIXED
+
+`0 10 * * 5` assumed deadlines are weekly. They are not. Across 2026-27 they
+fall on **Sat 26 times, Fri 5, Wed 5 and Sun 2**, and the five Wednesday
+midweek rounds - **GW13, 18, 20, 25, 28** - have no Friday between the previous
+deadline and their own:
+
+```
+  current: Fri 10:00 fixed
+    covered 33/38   MISSED ENTIRELY: 13, 18, 20, 25, 28
+    also fired up to 3x per gameweek, once with a lead of 362 hours
+
+  now: daily 10:00, act only if 2 <= hours-to-deadline < 26
+    covered 38/38   0 missed   0 doubles   leads 2.5-25.0h
+```
+
+Those five gameweeks would have gone in with a stale squad and lineup - no
+transfers, no captain change, injured players left in the XI.
+
+The cron is now daily and `manager.py` decides whether today is the day, from
+the real `deadline_time`. **The window is 24 hours wide on purpose**: narrower
+risks missing a deadline if a run fails, wider lets two consecutive daily runs
+both qualify and reintroduces the double submission the scheduler was disabled
+for. `--ignore-window` overrides it for manual dispatch.
+
 ## Things that will bite you
 
 - **`--ref` selects the code, not the workflow registration.** A workflow must
