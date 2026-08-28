@@ -1,24 +1,51 @@
 # Handoff — FPL Auto Manager
 
-Updated 2026-08-19. **Deployed**: `main` runs the expected-points model and
-Weekly Run is enabled. 146 tests.
+Updated 2026-08-28. **Deployed**, season in progress, `main` green.
 
 ## State
 
 | | |
 |---|---|
-| team | 5413589, GW1 squad submitted and verified against `/my-team/` |
-| GW1 deadline | Fri 21 Aug 2026 17:30 UTC |
-| Weekly Run | **active**, cron `0 10 * * 5` — Fri 10:00 UTC, 7.5h before the deadline |
-| Scheduler | deliberately **disabled** — its dedup marker writes to `/tmp` on an ephemeral runner so it never persists, and alongside the cron it can fire five times per deadline |
-| Tests | run in CI on the resolved dependency versions (`tests.yml`) |
-| accuracy | MAE 0.97, RMSE 1.96, R² 0.319 on GW10-38 of 2025-26 |
+| team | 5413589 |
+| GW1 | **53 pts** vs a 50 average, overall rank 3,482,299. Every starter played 90'. Haaland (C) returned 2. |
+| GW2 | deadline 28 Aug 17:30 UTC — **NO RUN FIRED**. Squad rolled over: 0 transfers, Haaland (C), XI unchanged. No flagged players in it, so the miss cost nothing visible this week. |
+| Weekly Run | cron **`0 10 * * *`** (daily). `manager.py --respect-window` decides whether today is the day. |
+| Deadline alerting | **NONE. See "the alerting gap" below - this is the top priority.** |
+| Scheduler | disabled, and `deadline_check.yml` depended on it |
+| Tests | 228 local, CI green on main |
+| accuracy | MAE 0.979, RMSE 1.976, **R2 0.3093** on GW10-38 of 2025-26, reproducible via `python backtest.py --season 2025-26` |
 
-Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R² 0.29-0.35 (Valouxis,
-NTUA 2023, n=6900, several compared models being paid products). **Those are
-2022/23 numbers and three seasons stale** — treat as a floor, not a target. A
-naive points-per-game baseline scores R² 0.257 on the same data, so the honest
-read is that we are just inside a dated band, not at the frontier.
+Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R2 0.29-0.35 (Valouxis,
+NTUA 2023, n=6900, several compared models being paid products). Those are
+2022/23 numbers and three seasons stale - treat as a floor, not a target. A
+naive points-per-game baseline scores R2 0.257 on the same data.
+
+## THE ALERTING GAP - fix this before any model work
+
+On 28 Aug the GW2 deadline passed with **no run at all**. Three layers failed
+independently and **two of them are still broken**:
+
+1. the scheduled run did not fire. It was a Friday and `0 10 * * 5` should have
+   triggered - GitHub drops scheduled runs under load and documents no
+   guarantee. *Mitigated* by the daily cron: five chances instead of one. Not
+   eliminated.
+2. **nothing checked that it fired.** `deadline_check.yml` is
+   `workflow_dispatch:` only. Its own comment says "dynamically triggered by
+   scheduler.yml" - and `scheduler.yml` has been `disabled_inactivity` since
+   April. The safety net has been dead for months and nothing noticed.
+3. **nothing could have told you.** No workflow and no Python file in the repo
+   references Telegram, despite `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
+   being listed as required secrets. The alerting was designed and never wired.
+
+**Build the alert against the OUTCOME, not the cron**: "the next deadline is
+inside N hours and there is no successful Weekly Run since the previous
+deadline". A checker that watches the cron dies the same silent death
+`deadline_check` did. It needs its own schedule, and ideally it should also
+complain when it has not heard from itself.
+
+This is worth more than every accuracy improvement in this repo combined. A
+missed deadline costs a whole gameweek; the entire goals/assists/clean-sheet
+apparatus is worth 0.004 R2.
 
 ## The single most important fact about this model
 
@@ -650,6 +677,47 @@ the real `deadline_time`. **The window is 24 hours wide on purpose**: narrower
 risks missing a deadline if a run fails, wider lets two consecutive daily runs
 both qualify and reintroduces the double submission the scheduler was disabled
 for. `--ignore-window` overrides it for manual dispatch.
+
+## Outstanding, verified but unfixed
+
+Ranked. All three were measured this session; none is shipped.
+
+1. **`recommend.py` prices hits 3.64x too cheap.** `manager.py:294` passes
+   `horizon_weight = sum(0.84**i for i in range(5)) = 3.636`; `recommend.py`
+   never passes it and `optimizer.py:349` defaults to 1.0. This is the *same
+   bug already fixed once in the same file* for `ownership_weight`, and
+   `optimizer.py:392-401` carries a nine-line comment describing exactly this
+   failure. The preview recommends hits production will refuse.
+2. **`ahead` is computed against `config.horizon`, not the events being
+   scored.** `xp_model.py:551` builds its list from `self.config.horizon` (5)
+   while `manager.py:273` scores `max(HORIZON, chips.PLANNING_HORIZON)` (10),
+   so GW6-10 silently get `ahead = 0` and `decay_doubt` never fires. A knock
+   heals through GW5 then un-heals. Confined to `xp_gw6..gw10`, which only
+   `chips.value_by_gameweek` reads, so it distorts chip timing rather than the
+   squad.
+3. **Squad depth dilutes start probability.** `_normalise_starts_within_team`
+   splits ten outfield shirts across everyone credible, and
+   `OUTFIELD_COMPETITION_ALPHA = 1.5` is not sharp enough to concentrate them
+   when the pool is large. Correlation between squad depth and the number of
+   players above 0.80 p_start is **-0.621**. Chelsea carry 21 credible
+   outfielders and get 2 above 0.80; Fulham carry 11 and get 5. Palmer comes
+   out at 0.603, which is the tell. This under-rates most of the top six.
+
+## Process failures from 2026-08-28, worth not repeating
+
+- **Merged to main with CI red.** PR CI from a week earlier was checked instead
+  of re-running. This file already warned that CI and local diverge, because CI
+  fetches a live snapshot while local uses the committed pre-season one. Three
+  tests asserted the snapshot *was* pre-season and broke the moment GW1
+  finished.
+- **A new test skipped silently in CI.** Helpers selected `start_rate > 0.8`,
+  which a week into a season is nobody, so four suspension tests passed by not
+  running. That is the fifth instance of "a green suite proving nothing" in
+  this repo. When adding a test that selects players by a threshold, check it
+  still selects somebody in-season.
+- **The submission path went unaudited for a whole session** while the model
+  got five bug fixes worth fractions of a point. The alerting gap above was one
+  `grep` away the entire time.
 
 ## Things that will bite you
 
