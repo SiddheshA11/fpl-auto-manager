@@ -256,3 +256,71 @@ def test_a_null_notifier_does_not_break_the_watchdog(monkeypatch):
                      notifier=notify.NullNotifier(), fetcher=_fetcher(SEASON))
     assert v["state"] == "overdue"
     assert gh.dispatched, "remediation must still happen when alerting is mute"
+
+
+# ------------------------------------------------- the marker write must be loud
+#
+# The marker is a single point of failure for the whole scheme: unset, the
+# watchdog concludes nothing was submitted and dispatches a second run, which
+# finds the free transfers spent and may take a -4 to use them. A GH_PAT
+# without permission to write repository variables would cause exactly this,
+# every gameweek, and a log warning would not surface it.
+
+
+class _FailingVariableWrite:
+    def __init__(self):
+        self.attempts = []
+
+    def get_variable(self, name):
+        return None
+
+    def set_variable(self, name, value):
+        self.attempts.append((name, value))
+        return False
+
+    def dispatch_workflow(self, *a, **k):
+        return True
+
+
+def test_a_failed_marker_write_alerts_rather_than_warning(monkeypatch):
+    import manager
+    import notify as notify_mod
+
+    spy = _SpyNotifier()
+    monkeypatch.setattr(notify_mod, "from_env", lambda *a, **k: spy)
+    gh = _FailingVariableWrite()
+    monkeypatch.setattr(manager, "_github", lambda: gh)
+
+    manager._record_submission(7)
+
+    assert gh.attempts == [("FPL_LAST_SUBMITTED_GW", "7")]
+    assert len(spy.sent) == 1, "a lost marker must reach a human, not only a log file"
+    assert "GW7 was submitted" in spy.sent[0]
+    assert "resubmit" in spy.sent[0] or "second run" in spy.sent[0]
+
+
+def test_a_successful_marker_write_stays_quiet(monkeypatch):
+    """Guards the other direction: alerting on the happy path trains it to be ignored."""
+    import manager
+    import notify as notify_mod
+
+    spy = _SpyNotifier()
+    monkeypatch.setattr(notify_mod, "from_env", lambda *a, **k: spy)
+    monkeypatch.setattr(manager, "_github", lambda: _FakeGitHub())
+
+    manager._record_submission(7)
+
+    assert spy.sent == []
+
+
+def test_a_local_run_without_credentials_neither_writes_nor_alerts(monkeypatch):
+    import manager
+    import notify as notify_mod
+
+    spy = _SpyNotifier()
+    monkeypatch.setattr(notify_mod, "from_env", lambda *a, **k: spy)
+    monkeypatch.setattr(manager, "_github", lambda: None)
+
+    manager._record_submission(7)
+
+    assert spy.sent == []

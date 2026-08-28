@@ -29,6 +29,7 @@ import pandas as pd
 import chips
 import deadline_state
 import github_api
+import notify
 import optimizer as optimizer_mod
 import priors
 import xp_model as X
@@ -242,9 +243,24 @@ def _record_submission(event_id: int) -> None:
         return
     if gh.set_variable(github_api.MARKER_VARIABLE, str(event_id)):
         logger.info("recorded GW%d as submitted", event_id)
-    else:
-        logger.warning("could not record the GW%d submission marker; the watchdog "
-                       "may raise a false alarm and a later run may resubmit", event_id)
+        return
+
+    # This is worse than it looks and must not pass as a warning in a log
+    # nobody reads. The marker is the only thing that tells the watchdog this
+    # gameweek is handled. Unset, the watchdog will conclude nothing was
+    # submitted and dispatch the weekly run again a few hours from now - and
+    # that run authenticates, finds the free transfers already spent, and may
+    # take a -4 to do something with them. The usual cause is a GH_PAT without
+    # permission to write repository variables.
+    logger.error("could not record the GW%d submission marker. The team IS submitted. "
+                 "The watchdog will not know that and may resubmit; check GH_PAT can "
+                 "write repository variables.", event_id)
+    notify.from_env().send(
+        f"*FPL weekly run*\n\nGW{event_id} was submitted, but the "
+        f"`{github_api.MARKER_VARIABLE}` marker could not be written. The watchdog "
+        "cannot see that this gameweek is done and may dispatch a second run, "
+        "which could take a hit. Check GH_PAT can write repository variables."
+    )
 
 
 def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2) -> dict | None:
