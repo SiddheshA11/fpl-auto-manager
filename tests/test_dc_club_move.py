@@ -151,7 +151,10 @@ def test_stale_preseason_totals_are_ignored():
     # reasons; xa90 passes through the blend untouched.
     joined = frame.join(ps.players[["xa90"]], on="code", rsuffix="_prior")
     both = joined.dropna(subset=["xa90_prior"])
-    both = both[both["minutes"] > 500]
+    # Any minutes at all. This was `> 500`, which only held while the bootstrap
+    # still carried last season's totals; once a season starts those reset to
+    # small current-season numbers and the filter selected nobody.
+    both = both[both["minutes"] > 0]
     assert len(both) > 50, "not enough overlap to make the comparison meaningful"
     assert np.allclose(both["xa90"], both["xa90_prior"], atol=1e-9), (
         "pre-season rates must come from the priors alone"
