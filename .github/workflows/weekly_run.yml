@@ -1,18 +1,27 @@
 name: FPL Auto Manager - Weekly Run
 
 on:
-  # Daily at 10:00 UTC. manager.py decides whether today is the day by checking
-  # the real deadline - see DEADLINE_WINDOW_MIN/MAX.
+  # Hourly. manager.py acts only inside a 2-6h window before the deadline, and
+  # the gate job below decides that in a few seconds without installing
+  # anything or logging in, so the other ~20 ticks a day are nearly free.
   #
-  # This was '0 10 * * 5'. Deadlines are not weekly: across 2026-27 they fall on
-  # Sat 26 times, Fri 5, Wed 5 and Sun 2, and the five Wednesday midweek rounds
-  # (GW13, 18, 20, 25, 28) have no Friday between the previous deadline and
-  # their own - so those five gameweeks got NO run at all and would have gone in
-  # with a stale squad and lineup. Other gameweeks fired up to three times, once
-  # with a lead of 362 hours.
+  # This was '0 10 * * 5', then '0 10 * * *'. The daily version fixed coverage
+  # of the five Wednesday midweek rounds and left a subtler hole: a 24h-wide
+  # window sampled every 24h admits exactly ONE qualifying tick per gameweek,
+  # for all 38, so there was no retry. On 2026-08-28 that one tick did not fire
+  # and a run appeared at 21:02, three and a half hours after the GW2 deadline.
+  #
+  # Widening the window instead of the sampling would have been worse: a
+  # 6-hourly cron on the old 2-26h band gives four ticks but the first one
+  # acts, at a lead of 22.0-25.5h, deciding every week on day-old team news.
+  # Hourly on a 2-6h band gives four qualifying ticks for every one of the 38
+  # gameweeks, the acting tick at a lead of 5.0-5.5h, three spares behind it.
+  # The FPL_LAST_SUBMITTED_GW marker is what stops the spares resubmitting.
   schedule:
-    - cron: '0 10 * * *'
-  # Manual trigger still available for testing
+    - cron: '0 * * * *'
+  # Manual trigger still available for testing. A dispatch deliberately skips
+  # the window and the marker: it is an explicit act, and it is also how the
+  # watchdog remediates a gameweek nothing else has submitted.
   workflow_dispatch:
     inputs:
       dry_run:
@@ -25,7 +34,32 @@ on:
           - 'true'
 
 jobs:
+  # Costs a few seconds and touches no credentials. Everything below it - the
+  # dependency install, the priors fetch, and above all the FPL login - is
+  # skipped on the ~20 hourly ticks a day that have nothing to do. That last
+  # point is not an optimisation: the FPL refresh token is single-use and
+  # rotates on login, so an hourly job that authenticated before checking the
+  # date would burn 24 rotations a day for one useful run.
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      should_run: ${{ steps.check.outputs.should_run }}
+      reason: ${{ steps.check.outputs.reason }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        env:
+          # Interpolated by GitHub from the repository variable manager.py
+          # writes after a successful submission. Empty when unset.
+          LAST_SUBMITTED_GW: ${{ vars.FPL_LAST_SUBMITTED_GW }}
+        run: python3 deadline_state.py
+
   manage-team:
+    needs: gate
+    # A manual dispatch is a deliberate act and runs whatever the gate says;
+    # that is also the path the watchdog uses to remediate a missed gameweek.
+    if: github.event_name != 'schedule' || needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -72,9 +106,11 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          # --respect-window only on the schedule. The cron fires daily and
-          # manager.py decides whether today is the day; a manual dispatch is a
-          # deliberate act and must run whenever it is asked to.
+          # --respect-window on the schedule only. It re-checks the window and
+          # the marker inside manager.py rather than trusting the gate: the
+          # gate runs minutes earlier in its own job, and a run that submits a
+          # second team because two jobs disagreed is worse than one that
+          # skips. A manual dispatch is deliberate and always acts.
           WINDOW=""
           if [ "${{ github.event_name }}" = "schedule" ]; then
             WINDOW="--respect-window"
@@ -84,6 +120,20 @@ jobs:
           else
             python manager.py $WINDOW
           fi
+
+      - name: Report a failed run
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -c "
+          import os, notify
+          notify.from_env().send(
+              '*FPL weekly run failed*\n\nThe run reached the acting window and did '
+              'not finish. The watchdog will retry, but check this.\n\n' + os.environ['RUN_URL'])
+          "
 
       - name: Upload logs
         if: always()
