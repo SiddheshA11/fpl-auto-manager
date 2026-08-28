@@ -1,0 +1,89 @@
+name: FPL Auto Manager - Deadline Watchdog
+
+# Asks one question, on its own schedule: is the next deadline close, and has
+# anything actually submitted a team for it?
+#
+# It exists because on 2026-08-28 the GW2 deadline passed with no run and
+# nothing said so. Three layers failed independently: the scheduled run did not
+# fire, deadline_check.yml could not have caught it (workflow_dispatch: only,
+# triggered by a scheduler.yml that has been disabled_inactivity since April),
+# and nothing anywhere in the repo referenced Telegram despite the secrets
+# being required.
+#
+# Two rules this file must keep:
+#   - it watches the OUTCOME, not the cron. A checker wired to the thing it is
+#     checking dies with it, silently, which is exactly what happened to
+#     deadline_check.yml.
+#   - it depends on almost nothing. Public FPL endpoints and the GitHub API.
+#     No FPL login, no priors, no requirements.txt - it has to survive the
+#     failures it reports on, including a broken dependency install.
+
+on:
+  schedule:
+    # Every 3 hours. The weekly run acts at a lead of 5.0-5.5h with three
+    # retries behind it, so this samples often enough to catch a gameweek
+    # where all four of those attempts failed, while there is still time.
+    - cron: '0 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Decide and log, but send and dispatch nothing'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
+
+# Needed to dispatch the weekly run when nothing else has.
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Deliberately no `pip install -r requirements.txt`. watchdog.py,
+      # deadline_state.py, github_api.py and notify.py are stdlib-only apart
+      # from notify's use of requests, which is present on the runner image.
+      # A dependency resolution failure has already shipped one silent bug in
+      # this repo; the watchdog must not be able to die of one.
+      - name: Run the watchdog
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # GH_PAT rather than GITHUB_TOKEN: a workflow_dispatch issued with
+          # the default token does not trigger further workflow runs, so
+          # remediation would silently do nothing.
+          GH_PAT: ${{ secrets.GH_PAT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            python3 watchdog.py --dry-run
+          else
+            python3 watchdog.py
+          fi
+
+      # The watchdog going red is itself unreportable by the watchdog. This is
+      # the one case where alerting on the job rather than the outcome is
+      # right, because the outcome is "the checker is broken".
+      - name: Report that the watchdog itself failed
+        if: failure()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          python3 -c "
+          import os, notify
+          notify.from_env().send(
+              '*FPL deadline watchdog*\n\nThe watchdog run itself failed. '
+              'Nothing is checking the deadline until this is fixed.\n\n' + os.environ['RUN_URL'])
+          "
