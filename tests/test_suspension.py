@@ -73,10 +73,16 @@ def _a_regular(bootstrap, fixtures, ps):
     """
     model = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=5))
     frame = model.players
-    idx = frame.index[(frame["start_rate"] > 0.8) & (frame["position"] != 1)]
-    if not len(idx):
-        pytest.skip("snapshot has no established outfield starters")
-    return int(frame.loc[idx[0], "id"])
+    # The best available outfielder, NOT everyone above a fixed threshold.
+    # `> 0.8` selected nobody once the season started - a week in, the
+    # season-to-date rate has not climbed that high - so these tests skipped
+    # silently in CI while passing locally against the pre-season snapshot.
+    # A test that skips proves nothing, which is the failure this repo keeps
+    # hitting.
+    outfield = frame[frame["position"] != 1].sort_values("start_rate", ascending=False)
+    if outfield.empty or float(outfield["start_rate"].iloc[0]) < 0.4:
+        pytest.skip("snapshot has no plausible outfield starter")
+    return int(outfield["id"].iloc[0])
 
 
 def _horizon_minutes(bootstrap, fixtures, ps, pid, horizon=5):
@@ -133,8 +139,13 @@ def test_preseason_does_not_read_last_seasons_cards(state):
     trap that halved the squad's expected points via a dtype check.
     """
     bootstrap, fixtures, ps = state
-    assert not any(e.get("finished") for e in bootstrap["events"]), \
-        "fixture is expected to be a pre-season snapshot"
+    # Synthesised, not assumed. This asserted the snapshot WAS pre-season,
+    # which was true in August and false the moment GW1 finished - CI fetches a
+    # live snapshot while local uses the committed one, so it passed here and
+    # broke there.
+    bootstrap = {**bootstrap,
+                 "events": [{**e, "finished": False, "is_current": False}
+                            for e in bootstrap["events"]]}
     pid = _a_regular(bootstrap, fixtures, ps)
 
     clean = _horizon_minutes(_with_cards(bootstrap, pid, 0), fixtures, ps, pid)

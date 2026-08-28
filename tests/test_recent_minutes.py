@@ -64,9 +64,11 @@ def test_a_player_dropped_from_the_side_is_marked_down(state):
     model = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=1))
     frame = model.players
     # Someone the model currently rates as a regular starter.
-    idx = frame.index[frame["start_rate"] > 0.8]
-    if not len(idx):
-        pytest.skip("snapshot has no established starters")
+    # Best available rather than a fixed threshold: `> 0.8` selected nobody
+    # once the season started, so this skipped silently in CI.
+    idx = frame.sort_values("start_rate", ascending=False).index[:1]
+    if not len(idx) or float(frame.loc[idx[0], "start_rate"]) < 0.4:
+        pytest.skip("snapshot has no plausible starter")
     pid = int(frame.loc[idx[0], "id"])
     base = float(frame.loc[idx[0], "start_rate"])
 
@@ -91,9 +93,11 @@ def test_one_rested_week_is_not_read_as_a_demotion(state):
     bootstrap = _played(bootstrap)
     base_model = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=1))
     frame = base_model.players
-    idx = frame.index[frame["start_rate"] > 0.8]
-    if not len(idx):
-        pytest.skip("snapshot has no established starters")
+    # Best available rather than a fixed threshold: `> 0.8` selected nobody
+    # once the season started, so this skipped silently in CI.
+    idx = frame.sort_values("start_rate", ascending=False).index[:1]
+    if not len(idx) or float(frame.loc[idx[0], "start_rate"]) < 0.4:
+        pytest.skip("snapshot has no plausible starter")
     pid = int(frame.loc[idx[0], "id"])
 
     rested = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=1),
@@ -105,6 +109,11 @@ def test_one_rested_week_is_not_read_as_a_demotion(state):
 def test_recent_minutes_are_ignored_before_a_ball_is_kicked(state):
     """Pre-season there is nothing to observe, and the priors are all there is."""
     bootstrap, fixtures, ps = state
+    # Force it rather than assume the snapshot is pre-season: CI fetches live
+    # data, so this held only until GW1 finished.
+    bootstrap = {**bootstrap,
+                 "events": [{**e, "finished": False, "is_current": False}
+                            for e in bootstrap["events"]]}
     plain = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=1))
     pid = int(plain.players["id"].iloc[0])
     with_lags = X.XPModel(bootstrap, fixtures, ps, X.ModelConfig(horizon=1),
