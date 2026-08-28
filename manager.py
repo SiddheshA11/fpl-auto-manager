@@ -255,7 +255,11 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
                 "GW%d deadline is %.1fh away, outside the %g-%gh window; nothing to do",
                 event_id, lead, DEADLINE_WINDOW_MIN, DEADLINE_WINDOW_MAX,
             )
-            return None
+            # A status dict, not None. None means "this run broke" and exits 1;
+            # deciding correctly that today is not the day is a healthy no-op.
+            # Conflating the two marked six runs in seven as failures and made
+            # "was there a successful run before the deadline" unanswerable.
+            return {"status": "skipped", "event_id": event_id, "lead_hours": lead}
         else:
             logger.info("GW%d deadline is %.1fh away; proceeding", event_id, lead)
 
@@ -450,10 +454,12 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     lineup_chip = decision.chip if decision.chip in ("bboost", "3xc") else None
     picks = _picks_payload(plan, lineup_chip)
 
+    lineup_ok = True
     if not dry_run:
         if client.set_lineup(picks, chip=lineup_chip) is not None:
             logger.info("lineup submitted")
         else:
+            lineup_ok = False
             logger.error("lineup submission failed")
     else:
         logger.info("[dry run] not submitting lineup")
@@ -465,6 +471,7 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     logger.info("=" * 60)
 
     return {
+        "status": "dry-run" if dry_run else ("submitted" if lineup_ok else "lineup-failed"),
         "event_id": event_id,
         "transfers_in": plan.transfers_in,
         "transfers_out": plan.transfers_out,
@@ -490,7 +497,9 @@ def main() -> int:
     if result is None:
         return 1
     print(json.dumps(result, indent=2, default=str))
-    return 0
+    # A lineup that did not go in is a failed run, even though everything
+    # before it worked. It previously logged an error and exited 0.
+    return 1 if result.get("status") == "lineup-failed" else 0
 
 
 if __name__ == "__main__":
