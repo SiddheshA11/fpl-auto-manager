@@ -1,6 +1,20 @@
 name: FPL Auto Manager - Deadline Check
 
-# Dynamically triggered by scheduler.yml ~2 hours before deadline
+# MANUAL ONLY. This is not currently a safety net and nothing triggers it.
+#
+# It was written to be dispatched by scheduler.yml ~2 hours before the
+# deadline. scheduler.yml has been disabled_inactivity since April 2026, so
+# this workflow has not run on its own for months and nothing noticed - it is
+# layer two of the three that failed silently when the GW2 deadline passed
+# unattended on 2026-08-28.
+#
+# The live deadline safety net is now watchdog.yml, which watches the outcome
+# (was a team submitted for the next gameweek?) rather than the cron, on its
+# own schedule. What this file still does that the watchdog does not is re-read
+# availability and repair the lineup after late team news. Rewiring it onto a
+# schedule of its own is the obvious next step; until that happens, do not
+# treat its existence as coverage.
+#
 # Acts as a safety net to catch last-minute injury news
 
 on:
