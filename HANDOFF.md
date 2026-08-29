@@ -680,28 +680,60 @@ for. `--ignore-window` overrides it for manual dispatch.
 
 ## Outstanding, verified but unfixed
 
-Ranked. All three were measured this session; none is shipped.
+Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
 
-1. **`recommend.py` prices hits 3.64x too cheap.** `manager.py:294` passes
-   `horizon_weight = sum(0.84**i for i in range(5)) = 3.636`; `recommend.py`
-   never passes it and `optimizer.py:349` defaults to 1.0. This is the *same
-   bug already fixed once in the same file* for `ownership_weight`, and
-   `optimizer.py:392-401` carries a nine-line comment describing exactly this
-   failure. The preview recommends hits production will refuse.
-2. **`ahead` is computed against `config.horizon`, not the events being
-   scored.** `xp_model.py:551` builds its list from `self.config.horizon` (5)
-   while `manager.py:273` scores `max(HORIZON, chips.PLANNING_HORIZON)` (10),
-   so GW6-10 silently get `ahead = 0` and `decay_doubt` never fires. A knock
-   heals through GW5 then un-heals. Confined to `xp_gw6..gw10`, which only
-   `chips.value_by_gameweek` reads, so it distorts chip timing rather than the
-   squad.
-3. **Squad depth dilutes start probability.** `_normalise_starts_within_team`
-   splits ten outfield shirts across everyone credible, and
-   `OUTFIELD_COMPETITION_ALPHA = 1.5` is not sharp enough to concentrate them
-   when the pool is large. Correlation between squad depth and the number of
-   players above 0.80 p_start is **-0.621**. Chelsea carry 21 credible
-   outfielders and get 2 above 0.80; Fulham carry 11 and get 5. Palmer comes
-   out at 0.603, which is the tell. This under-rates most of the top six.
+1. ~~**`recommend.py` prices hits 3.64x too cheap.**~~ **FIXED.** It passed no
+   `horizon_weight`, so hits were priced against optimizer.py's default of 1.0
+   while the value column sums five decayed gameweeks. Measured on the
+   committed snapshot over six suboptimal squads x {0, 1} free transfers: all
+   twelve scenarios diverged, the preview taking the maximum two hits in every
+   case where the weekly run takes none. Computed from `args.horizon`, since
+   unlike manager.py's constant this tool takes the horizon as an argument.
+   Test asserts what the optimiser was *handed*, in `test_recommend_tilt.py`.
+2. ~~**`ahead` is computed against `config.horizon`.**~~ **FIXED.** It is now
+   read from the full remaining calendar, which is what "how many gameweeks
+   away" means. The old curve had 25 doubtful players healing 0.7300 ->
+   0.9831 through GW5 and then snapping back to 0.7300 for GW6-10, and
+   `_suspension_risk` returning early on `ahead <= 0` for the same gameweeks.
+   `xp_gw1..gw5` and `xp_horizon` are bit-identical, with a test pinning that.
+   **Negative result: it changes no chip decision** on the current snapshot -
+   triple captain stays GW7, bench boost stays GW1, only the valuation moves
+   (6.57 -> 6.49). Right because the old curve modelled nothing, not because
+   it moves a decision. See `tests/test_ahead_horizon.py`.
+3. **Squad depth dilutes start probability — MEASURED, DO NOT "FIX".**
+   `measure_competition_alpha.py` sweeps `OUTFIELD_COMPETITION_ALPHA` against
+   held-out accuracy and against the symptom itself. They point in opposite
+   directions:
+
+```
+   alpha   R2 22-23  23-24  24-25  25-26   MEAN | corr(depth,above80)  Palmer
+   0.75      0.2608 0.2944 0.3811 0.3135 0.3125 |          -0.467      0.471
+   1.00      0.2715 0.2961 0.3848 0.3216 0.3185 |          -0.611      0.516
+   1.25      0.2732 0.2923 0.3812 0.3197 0.3166 |          -0.563      0.555
+   1.50      0.2715 0.2890 0.3779 0.3161 0.3136 |          -0.330      0.588  <- production
+   2.00      0.2663 0.2832 0.3725 0.3088 0.3077 |          -0.342      0.637
+   3.00      0.2558 0.2727 0.3623 0.2943 0.2963 |          -0.257      0.687
+```
+
+   Sharpening alpha is what the open question implied. It fixes the symptom
+   monotonically - Palmer rises to 0.687, the correlation weakens to -0.257 -
+   and it **costs accuracy in all four seasons**, -0.006 R2 at 2.0 and -0.017
+   at 3.0. The accuracy-optimal direction is the opposite, alpha ~1.0, worth
+   **+0.005 R2** and better in every season measured - and it makes the
+   symptom *worse*, driving the correlation to -0.611 and Palmer to 0.516.
+
+   So the depth correlation is not a defect that this constant can repair. A
+   model that concentrates start probability the way the symptom asks for is
+   a less accurate model. Note also that the -0.621 in the original write-up
+   does not reproduce at production alpha: it ranges -0.33 to -0.59 depending
+   on how "credible" is defined, and turns *positive* at some thresholds.
+   -0.611 is what alpha 1.0 produces, not alpha 1.5.
+
+   **alpha 1.0 is a live candidate but is NOT shipped.** +0.005 R2 is
+   comparable to the entire goals/assists/clean-sheet apparatus (0.004), but
+   it changes squad selection, so it needs `simulate.py` with a control
+   against the 141-point noise floor before it goes anywhere near production.
+   The accuracy sweep is in-sample over the four seasons used to pick it.
 
 ## Process failures from 2026-08-28, worth not repeating
 
