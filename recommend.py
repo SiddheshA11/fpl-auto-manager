@@ -126,8 +126,24 @@ def main() -> int:
     if args.transfer:
         if not owned:
             raise SystemExit("--transfer needs --squad with your current element ids")
+        # The -4 for a hit is compared against `xp_horizon`, a decay-weighted
+        # sum over args.horizon gameweeks, so it has to be expressed on the
+        # same scale. Omitted, it fell back to optimizer.py's default of 1.0
+        # and priced hits ~3.6x too cheap: measured over six suboptimal squads
+        # x {0, 1} free transfers, all twelve diverged, the preview taking the
+        # maximum two hits in every case where the weekly run takes none.
+        #
+        # This is the second argument in this call to have gone missing the
+        # same way; see the note on ownership_weight above. Computed from
+        # args.horizon rather than hardcoded, because unlike manager.py's
+        # constant this tool takes the horizon as an argument.
+        horizon_weight = sum(
+            X.ModelConfig(horizon=args.horizon).horizon_decay ** i
+            for i in range(args.horizon)
+        )
         sol = opt.optimise_transfers(
-            owned, bank=args.bank, free_transfers=args.free_transfers, max_hits=args.max_hits
+            owned, bank=args.bank, free_transfers=args.free_transfers,
+            max_hits=args.max_hits, horizon_weight=horizon_weight,
         )
         names = pool.set_index("id")["web_name"].to_dict()
         print("\n=== TRANSFERS ===")
