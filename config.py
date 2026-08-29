@@ -96,3 +96,55 @@ STRATEGY = {
 # This is the one number here worth re-measuring as the season moves: it
 # depends on the price and ownership landscape, not on anything structural.
 OWNERSHIP_WEIGHT = float(os.environ.get("FPL_OWNERSHIP_WEIGHT", "0.2"))
+
+
+# ─── Whose ownership the tilt aims at ───
+#
+# OWNERSHIP_WEIGHT above tilts toward `selected_by_percent`, the eleven-million
+# player template. The league that decides the season is a couple of dozen
+# specific managers, and those are measurably not the same distribution.
+# Measured on GW2 2026-27 across 45 rivals, the template understates the field
+# for every top-owned player and always in the same direction:
+#
+#     Kinsky       field 55.6%   template 22.4%   +33.2pp
+#     Calafiori    field 68.9%   template 41.7%   +27.2pp
+#     Szoboszlai   field 66.7%   template 43.2%   +23.5pp
+#     Haaland      field 84.4%   template 68.5%   +15.9pp
+#
+# The swap cannot carry the weight across unchanged, which is the trap. The
+# objective multiplies `weight * (1 - 2*ownership)`, so its force scales with
+# that term's spread - and the field is the wider distribution, because in a
+# 45-manager league most players are owned by nobody at all. Measured spread
+# ratio 1.299 (GW1) and 1.301 (GW2), so +0.20 on the field would tilt at an
+# effective +0.26: harder, not merely better aimed, and afterwards the two
+# would be impossible to tell apart.
+#
+# +0.154 is the strength-matched weight, and at it the swap dominates the
+# template on both axes rather than trading between them:
+#
+#     configuration                   XI xP   mean field EO
+#     template  @ +0.20  production    48.93        33.7%
+#     field     @ +0.154 matched       49.87        34.1%
+#     no tilt   @  0.00  control       50.94        23.2%
+#
+# Same protection against the field, about a point more expected per gameweek,
+# because the tilt is finally aimed at the distribution it was always meant to
+# be aimed at. Reproduce with `python3 measure_rival_tilt.py`.
+#
+# Reads public endpoints only and spends no refresh token. Falls back to the
+# template if the rival picks cannot be read, so the weekly run cannot fail on
+# it.
+USE_FIELD_OWNERSHIP = os.environ.get("FPL_USE_FIELD_OWNERSHIP", "1") not in ("0", "false", "False")
+FIELD_OWNERSHIP_WEIGHT = float(os.environ.get("FPL_FIELD_OWNERSHIP_WEIGHT", "0.154"))
+
+# The armband, tilted on captaincy ownership - a third distribution again, and
+# far more concentrated than squad ownership. Across 45 rivals in GW2 only six
+# players took the armband at all, and Joao Pedro was owned by 86.7% while
+# being captained by 8.9%.
+#
+# Deliberately 0.0. The machinery is what was missing, not the conviction: the
+# optimiser could not tilt captaincy at all before rivals.py existed, because
+# FPL publishes squad ownership and not captain rates. Setting this above zero
+# needs a season of evidence, and captaincy is the highest-leverage call of the
+# week - the wrong sign here is expensive.
+CAPTAIN_OWNERSHIP_WEIGHT = float(os.environ.get("FPL_CAPTAIN_OWNERSHIP_WEIGHT", "0.0"))
