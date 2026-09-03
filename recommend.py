@@ -22,9 +22,10 @@ from pathlib import Path
 import pandas as pd
 
 import priors
+import rivals
 import xp_model as X
 from fetch_data import LIVE_ENDPOINTS, _get
-from config import OWNERSHIP_WEIGHT
+from config import FPL_TEAM_ID
 from optimizer import SquadOptimizer, format_squad
 
 logger = logging.getLogger("fpl_auto.recommend")
@@ -119,9 +120,16 @@ def main() -> int:
     # it previewed a squad without Haaland and 0.56 xP short of the one that
     # would actually be submitted. deadline_check.py had the identical bug and
     # carries a note about it; this caller was missed.
-    logger.info("ownership tilt: %+.2f", OWNERSHIP_WEIGHT)
+    # Same helper the weekly run uses, so the preview cannot aim at a
+    # different field from the submission. Two separate bugs in this file came
+    # from passing a tilt argument the weekly run did not.
+    tilt = rivals.tilt_inputs(pool, FPL_TEAM_ID, events[0] - 1)
+    pool = tilt.scored
+    logger.info("ownership tilt: %+.3f on the %s", tilt.ownership_weight, tilt.source)
     opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
-                         ownership_weight=OWNERSHIP_WEIGHT)
+                         ownership_weight=tilt.ownership_weight,
+                         ownership_col=tilt.ownership_col,
+                         captain_ownership_weight=tilt.captain_weight)
 
     if args.transfer:
         if not owned:
