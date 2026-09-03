@@ -82,6 +82,11 @@ FREE_TRANSFER_VALUE = 0.3
 # a small league actually requires. See `ownership_weight` on SquadOptimizer.
 OWNERSHIP_WEIGHT = 0.0
 
+# Captaincy is tilted on its own distribution or not at all. Defaults to 0.0:
+# the machinery exists, the right value does not yet. See the note on the
+# captain term in _base_program.
+CAPTAIN_OWNERSHIP_WEIGHT = 0.0
+
 
 @dataclass
 class SquadSolution:
@@ -115,6 +120,8 @@ class SquadOptimizer:
         bench_weight: float = DEFAULT_BENCH_WEIGHT,
         ownership_weight: float = OWNERSHIP_WEIGHT,
         ownership_col: str = "selected_by_percent",
+        captain_ownership_weight: float = CAPTAIN_OWNERSHIP_WEIGHT,
+        captain_ownership_col: str = "field_captaincy",
     ):
         required = {"id", "position", "team", "cost", value_col}
         missing = required - set(players.columns)
@@ -161,6 +168,31 @@ class SquadOptimizer:
         # fewer points", which is never what any setting of this knob means.
         self.risk_multiplier = np.clip(
             1.0 - self.ownership_weight * (1.0 - 2.0 * self.ownership), 0.0, None
+        )
+
+        # The armband's own exposure. Read from a separate column because
+        # captaincy is a different distribution from squad ownership, not a
+        # scaled version of it: measured over 45 rivals in GW2 2026-27, Joao
+        # Pedro was owned by 86.7% and captained by 8.9%, while Bruno Fernandes
+        # was owned by 60.0% and captained by 28.9%. Six players took the
+        # armband across the whole field.
+        self.captain_ownership_weight = float(captain_ownership_weight)
+        if captain_ownership_col in self.players.columns:
+            ceo = pd.to_numeric(self.players[captain_ownership_col], errors="coerce")
+            self.captain_ownership = (ceo.fillna(0.0) / 100.0).clip(0.0, 1.0).to_numpy(dtype=float)
+        else:
+            if self.captain_ownership_weight:
+                logger.warning(
+                    "captain_ownership_weight=%.2f requested but column %r is absent; "
+                    "captaincy stays untilted",
+                    self.captain_ownership_weight, captain_ownership_col,
+                )
+            self.captain_ownership = np.zeros(self.n, dtype=float)
+            self.captain_ownership_weight = 0.0
+
+        self.captain_risk_multiplier = np.clip(
+            1.0 - self.captain_ownership_weight * (1.0 - 2.0 * self.captain_ownership),
+            0.0, None,
         )
 
     # ---------- program construction ----------
@@ -217,21 +249,25 @@ class SquadOptimizer:
         # re-weights players against each other without disturbing the balance
         # between starting and benching any one of them.
         #
-        # Captaincy is deliberately left untilted. The exposure that matters for
-        # an armband is *captaincy* effective ownership, not squad ownership,
-        # and the two come apart badly: a defender owned by 29% of managers may
-        # be captained by almost none of them, while a midfielder owned by 49%
-        # takes the armband from a quarter of the field. FPL publishes the
-        # former and not the latter, so tilting the captain on squad ownership
-        # applies a proxy that is wrong in a known direction - it read Gabriel
-        # at 5.12 xP as a better captain than Bruno Fernandes at 5.49 purely
-        # because fewer people own him. Captaincy doubles a score and is the
-        # highest-leverage call of the week; it gets made on points.
+        # Captaincy is tilted on captaincy ownership, or not at all - never on
+        # squad ownership. The two come apart badly: a defender owned by 29% of
+        # managers may be captained by almost none of them, while a midfielder
+        # owned by 49% takes the armband from a quarter of the field. Tilting
+        # the captain on the squad proxy read Gabriel at 5.12 xP as a better
+        # captain than Bruno Fernandes at 5.49 purely because fewer people
+        # owned him.
+        #
+        # This used to be untilted unconditionally, because "FPL publishes the
+        # former and not the latter". That is no longer true: rivals.py reads
+        # actual captain rates from the mini leagues off public endpoints. The
+        # weight still defaults to 0.0, so the behaviour is unchanged until
+        # somebody measures the right value - the machinery is what was
+        # missing, not the conviction.
         value = self.value * self.risk_multiplier
         objective = np.concatenate([
             -value * self.bench_weight,                           # owned (bench share)
             -value * (1.0 - self.bench_weight),                   # promoted to XI
-            -self.captain_value,                                  # captaincy doubles the score
+            -self.captain_value * self.captain_risk_multiplier,   # captaincy doubles the score
         ])
         return objective, cons
 

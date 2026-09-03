@@ -32,8 +32,9 @@ import github_api
 import notify
 import optimizer as optimizer_mod
 import priors
+import rivals
 import xp_model as X
-from config import FPL_TEAM_ID, OWNERSHIP_WEIGHT
+from config import FPL_TEAM_ID
 from fpl_client import FPLClient
 from optimizer import SquadOptimizer, format_squad
 
@@ -103,7 +104,7 @@ def _picks_payload(sol, chip: str | None) -> list[dict]:
     return payload
 
 
-def _reoptimise_lineup(plan, scored: pd.DataFrame):
+def _reoptimise_lineup(plan, scored, tilt: pd.DataFrame):
     """
     Re-pick the XI, captain and bench order over the squad in `plan`.
 
@@ -120,7 +121,8 @@ def _reoptimise_lineup(plan, scored: pd.DataFrame):
     try:
         lineup = SquadOptimizer(
             owned, value_col="xp_next", captain_col="xp_next",
-            ownership_weight=OWNERSHIP_WEIGHT,
+            ownership_weight=tilt.ownership_weight, ownership_col=tilt.ownership_col,
+            captain_ownership_weight=tilt.captain_weight,
         ).optimise_lineup()
     except (RuntimeError, ValueError) as e:
         logger.warning("lineup re-optimisation failed (%s); keeping the horizon lineup", e)
@@ -374,12 +376,17 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
 
     # Unavailable players are dropped from the buy pool but kept if already
     # owned, so an injured player still gets valued (near zero) for selling.
+    # Whose ownership the tilt aims at. One helper decides it for the weekly
+    # run, the pre-deadline check and the preview tool alike; see rivals.py for
+    # why that is not merely tidiness. Reads public endpoints and falls back to
+    # the template, so it cannot fail the run.
+    tilt = rivals.tilt_inputs(scored, FPL_TEAM_ID, event_id - 1)
+    scored = tilt.scored
     pool = scored[scored["status"].isin(["a", "d"]) | scored["id"].isin(squad_ids)].copy()
-    logger.info("ownership tilt: %+.2f (%s)", OWNERSHIP_WEIGHT,
-                "differentials" if OWNERSHIP_WEIGHT < 0
-                else "template" if OWNERSHIP_WEIGHT > 0 else "pure expected points")
     opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
-                         ownership_weight=OWNERSHIP_WEIGHT)
+                         ownership_weight=tilt.ownership_weight,
+                         ownership_col=tilt.ownership_col,
+                         captain_ownership_weight=tilt.captain_weight)
 
     logger.info("STEP 4: evaluating chips")
     budget = bank + sum(selling.values())
@@ -400,7 +407,9 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     # a free hit is worth playing, so the chip would never trigger.
     wildcard_squad = opt.build_squad(budget=budget)
     free_hit_squad = SquadOptimizer(
-        pool, value_col="xp_next", captain_col="xp_next", ownership_weight=OWNERSHIP_WEIGHT
+        pool, value_col="xp_next", captain_col="xp_next",
+        ownership_weight=tilt.ownership_weight, ownership_col=tilt.ownership_col,
+        captain_ownership_weight=tilt.captain_weight,
     ).build_squad(budget=budget)
 
     # Baseline the wildcard against the post-transfer squad, not the current
@@ -485,7 +494,9 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
             try:
                 plan = SquadOptimizer(
                     owned, value_col="xp_next", captain_col="xp_next",
-                    ownership_weight=OWNERSHIP_WEIGHT,
+                    ownership_weight=tilt.ownership_weight,
+                    ownership_col=tilt.ownership_col,
+                    captain_ownership_weight=tilt.captain_weight,
                 ).optimise_lineup()
             except (RuntimeError, ValueError) as e:
                 logger.critical("could not rebuild a lineup from the owned squad: %s", e)
@@ -500,7 +511,7 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     # horizon column, which benches players who are worth more *this* gameweek
     # than the starters ahead of them. Re-solve the eleven over the squad we
     # now hold, scored on the coming gameweek alone.
-    plan = _reoptimise_lineup(plan, scored)
+    plan = _reoptimise_lineup(plan, scored, tilt)
 
     lineup_chip = decision.chip if decision.chip in ("bboost", "3xc") else None
     picks = _picks_payload(plan, lineup_chip)

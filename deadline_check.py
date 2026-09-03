@@ -21,8 +21,9 @@ from datetime import datetime, timezone
 import pandas as pd
 
 import priors
+import rivals
 import xp_model as X
-from config import FPL_TEAM_ID, OWNERSHIP_WEIGHT
+from config import FPL_TEAM_ID
 from fpl_client import FPLClient
 from optimizer import SquadOptimizer, format_squad
 
@@ -106,8 +107,12 @@ def run_deadline_check(dry_run: bool = False) -> dict | None:
     #     is an ordering problem; build_squad re-solves a selection problem
     #     against a budget equal to the squad's own cost, which is feasible
     #     only by a hair and reports "infeasible" when it is not.
+    tilt = rivals.tilt_inputs(squad, FPL_TEAM_ID, event_id - 1)
+    squad = tilt.scored
     opt = SquadOptimizer(squad, value_col="xp_next", captain_col="xp_next",
-                         ownership_weight=OWNERSHIP_WEIGHT)
+                         ownership_weight=tilt.ownership_weight,
+                         ownership_col=tilt.ownership_col,
+                         captain_ownership_weight=tilt.captain_weight)
     try:
         sol = opt.optimise_lineup()
     except (RuntimeError, ValueError) as e:

@@ -156,3 +156,91 @@ def field_ownership(client: PublicFPL, entry_id: int, event: int,
         squad={e: c / n for e, c in squad.items()},
         captain={e: c / n for e, c in captain.items()},
     )
+
+
+# Column names the optimiser reads. Kept here so the producer and the consumer
+# cannot drift apart silently, which is how `selected_by_percent` ended up
+# hardcoded in three places.
+FIELD_OWNERSHIP_COL = "field_ownership"
+FIELD_CAPTAINCY_COL = "field_captaincy"
+
+
+def attach(scored, ownership: FieldOwnership):
+    """
+    Add field ownership and field captaincy to a scored frame, as percentages.
+
+    Percentages rather than fractions because that is what the optimiser's
+    ownership handling already expects of `selected_by_percent`, and having two
+    conventions for the same quantity is how the units bugs in this repo start.
+
+    A player no rival owns gets 0.0, which is the honest number: in a
+    45-manager league most of the 622 players genuinely are owned by nobody.
+    That is also why this distribution is wider than the template and why the
+    tilt weight cannot be carried across unchanged - see measure_rival_tilt.py.
+    """
+    out = scored.copy()
+    ids = out["id"].astype(int)
+    out[FIELD_OWNERSHIP_COL] = [ownership.squad_share(i) * 100.0 for i in ids]
+    out[FIELD_CAPTAINCY_COL] = [ownership.captain_share(i) * 100.0 for i in ids]
+    return out
+
+
+def field_ownership_or_none(entry_id: int, event: int, client: "PublicFPL | None" = None):
+    """
+    Field ownership for the last completed gameweek, or None.
+
+    Never raises. The weekly run must not fail because a rival's picks 404ed or
+    the league endpoint was slow - it falls back to the template, which is what
+    it used before this existed.
+    """
+    try:
+        client = client or PublicFPL()
+        fo = field_ownership(client, entry_id, event)
+    except Exception as e:  # noqa: BLE001 - a tilt input may not break the run
+        logger.warning("field ownership unavailable (%s: %s); falling back to the template",
+                       type(e).__name__, e)
+        return None
+    if not fo.managers:
+        logger.info("no rival picks for GW%s; falling back to the template", event)
+        return None
+    return fo
+
+
+@dataclass
+class TiltInputs:
+    """What the optimiser needs to aim its tilt, and where it came from."""
+
+    scored: object
+    ownership_col: str
+    ownership_weight: float
+    captain_weight: float
+    source: str          # "field" or "template", for the log
+
+
+def tilt_inputs(scored, entry_id: int, event: int) -> TiltInputs:
+    """
+    One place that decides whose ownership the tilt aims at.
+
+    Every caller that builds a SquadOptimizer goes through this - the weekly
+    run, the pre-deadline check and the preview tool. That is not tidiness:
+    this repo has shipped two separate bugs where one of those three passed a
+    different tilt from the others and nobody noticed, because each argument
+    defaults to something harmless-looking rather than failing.
+
+    `event` is the gameweek to read rival picks from, which must be one that
+    has already been played - /entry/{id}/event/{gw}/picks/ publishes nothing
+    before the deadline passes.
+    """
+    from config import (CAPTAIN_OWNERSHIP_WEIGHT, FIELD_OWNERSHIP_WEIGHT,
+                        OWNERSHIP_WEIGHT, USE_FIELD_OWNERSHIP)
+
+    if USE_FIELD_OWNERSHIP and event >= 1:
+        fo = field_ownership_or_none(entry_id, event)
+        if fo is not None:
+            logger.info("tilting on the field: %d rivals from GW%d, weight %+.3f",
+                        fo.managers, event, FIELD_OWNERSHIP_WEIGHT)
+            return TiltInputs(attach(scored, fo), FIELD_OWNERSHIP_COL,
+                              FIELD_OWNERSHIP_WEIGHT, CAPTAIN_OWNERSHIP_WEIGHT, "field")
+
+    logger.info("tilting on the template, weight %+.2f", OWNERSHIP_WEIGHT)
+    return TiltInputs(scored, "selected_by_percent", OWNERSHIP_WEIGHT, 0.0, "template")
