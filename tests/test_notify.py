@@ -114,3 +114,111 @@ def test_complete_credentials_give_a_real_notifier():
     """Guards the other direction: a NullNotifier in production alerts nobody."""
     n = notify.from_env({"TELEGRAM_BOT_TOKEN": "TOK", "TELEGRAM_CHAT_ID": "123"})
     assert isinstance(n, notify.TelegramNotifier)
+
+
+# ------------------------------------------------- the transport, for real
+#
+# Every test above passes a fake transport, so the real one was never executed
+# and `import requests` sat at the top of this module unnoticed. The deadline
+# watchdog installs no dependencies, so on its first scheduled run it died with
+# ModuleNotFoundError - and its own failure-reporting step died the same way,
+# which made the failure silent. Exactly what the watchdog exists to prevent.
+
+
+def test_the_watchdog_import_graph_needs_nothing_outside_the_standard_library():
+    """
+    The watchdog installs no dependencies at all, by design - it has to survive
+    the failures it reports on, including a broken dependency install. So every
+    module it reaches must be stdlib.
+
+    This is the assertion that would have caught the outage: notify.py imported
+    `requests`, the watchdog died with ModuleNotFoundError on its first
+    scheduled run, and its own failure-reporting step died the same way.
+    """
+    import ast
+    import pathlib
+    import sys
+
+    repo = pathlib.Path(notify.__file__).parent
+    local = {"deadline_state", "notify", "github_api", "watchdog", "config"}
+    offenders = {}
+
+    for name in ("watchdog.py", "notify.py", "deadline_state.py", "github_api.py"):
+        imported = set()
+        for node in ast.walk(ast.parse((repo / name).read_text())):
+            if isinstance(node, ast.Import):
+                imported.update(a.name.split(".")[0] for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                imported.add(node.module.split(".")[0])
+        third_party = imported - set(sys.stdlib_module_names) - local
+        if third_party:
+            offenders[name] = sorted(third_party)
+
+    assert not offenders, (
+        f"the watchdog reaches third-party imports {offenders}, which its "
+        "workflow does not install; it will die of ModuleNotFoundError on the "
+        "runner and take its own failure alert down with it"
+    )
+
+
+def test_the_real_transport_posts_json_and_reads_the_status():
+    """
+    Runs the actual urllib transport against a real socket. Don't mock what you
+    can run - a fake transport is what hid the bug in the first place.
+    """
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    received = {}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            received["path"] = self.path
+            received["json"] = _json.loads(body)
+            received["content_type"] = self.headers["Content-Type"]
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.handle_request, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_port}/botTOK/sendMessage"
+
+    resp = notify._urllib_post(url, {"chat_id": "1", "text": "hi"}, timeout=5)
+
+    assert resp.status_code == 200
+    assert received["json"] == {"chat_id": "1", "text": "hi"}
+    assert received["content_type"] == "application/json"
+    srv.server_close()
+
+
+def test_the_real_transport_returns_http_errors_rather_than_raising():
+    """
+    A 401 must come back as a response so the retry policy can tell it from a
+    transient 500 and stop instead of hammering.
+    """
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(401)
+            self.end_headers()
+            self.wfile.write(b"Unauthorized")
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.handle_request, daemon=True).start()
+
+    resp = notify._urllib_post(f"http://127.0.0.1:{srv.server_port}/x", {"a": 1}, timeout=5)
+
+    assert resp.status_code == 401
+    assert "Unauthorized" in resp.text
+    srv.server_close()
