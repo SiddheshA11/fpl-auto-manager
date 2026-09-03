@@ -75,3 +75,88 @@ def test_recommend_and_manager_read_the_same_setting():
 
     assert R.OWNERSHIP_WEIGHT is config.OWNERSHIP_WEIGHT
     assert manager.OWNERSHIP_WEIGHT is config.OWNERSHIP_WEIGHT
+
+
+# ------------------------------------------------------------- horizon_weight
+#
+# The same class of bug, in the same file, one argument along. `recommend.py`
+# passed no `horizon_weight`, so it used optimizer.py's default of 1.0 while
+# manager.py passes sum(decay**i) ~= 3.64. The -4 for a hit was compared
+# against `xp_horizon`, a decay-weighted sum over five gameweeks, so hits were
+# priced roughly 3.6x too cheap and the preview recommended moves production
+# refuses.
+#
+# Measured on the committed snapshot over six suboptimal squads x {0, 1} free
+# transfers: 12 of 12 scenarios diverge, the preview taking the maximum two
+# hits in every one where production takes none.
+
+
+class _TransferRecorder:
+    """Records the kwargs optimise_transfers was actually called with."""
+
+    seen: list[dict] = []
+
+    def __init__(self, players, value_col=None, captain_col=None, **kwargs):
+        self._inner = O.SquadOptimizer(players, value_col, captain_col, **kwargs)
+
+    def optimise_transfers(self, current_squad_ids, **kwargs):
+        _TransferRecorder.seen.append(dict(kwargs))
+        return self._inner.optimise_transfers(current_squad_ids, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+@pytest.fixture(scope="module")
+def owned_squad():
+    """
+    A legal 15 from the committed snapshot. It has to be legal: an arbitrary
+    fifteen ids violates the position and per-club constraints and the solver
+    reports infeasible before any argument reaches it.
+    """
+    bootstrap, fixtures = R.load_game_state(offline=True)
+    scored, _ = R.build_model(bootstrap, fixtures, 5)
+    pool = R._exclude_unavailable(scored)
+    sol = O.SquadOptimizer(pool, "xp_horizon", "xp_next").build_squad(100.0)
+    return ",".join(str(int(i)) for i in sol.squad["id"])
+
+
+def test_recommend_prices_hits_on_the_same_scale_as_the_weekly_run(monkeypatch, owned_squad):
+    _TransferRecorder.seen = []
+    monkeypatch.setattr(R, "SquadOptimizer", _TransferRecorder)
+    squad = owned_squad
+    monkeypatch.setattr("sys.argv", [
+        "recommend.py", "--offline", "--transfer", "--squad", squad, "--horizon", "5",
+    ])
+
+    assert R.main() == 0
+    assert _TransferRecorder.seen, "recommend.py never called optimise_transfers"
+    got = _TransferRecorder.seen[0]
+
+    assert "horizon_weight" in got, (
+        "recommend.py passed no horizon_weight, so hits are priced against "
+        "optimizer.py's default of 1.0 while the value column sums five "
+        "decayed gameweeks - about 3.6x too cheap, and the preview recommends "
+        "hits production will refuse"
+    )
+    expected = sum(X.ModelConfig(horizon=5).horizon_decay ** i for i in range(5))
+    assert got["horizon_weight"] == pytest.approx(expected)
+    assert got["horizon_weight"] > 3.0, "a weight near 1.0 means the bug is back"
+
+
+def test_the_hit_price_tracks_the_requested_horizon(monkeypatch, owned_squad):
+    """
+    recommend.py takes --horizon as an argument where manager.py has a
+    constant, so a hardcoded 3.64 would be wrong at every other horizon.
+    """
+    _TransferRecorder.seen = []
+    monkeypatch.setattr(R, "SquadOptimizer", _TransferRecorder)
+    monkeypatch.setattr("sys.argv", [
+        "recommend.py", "--offline", "--transfer", "--squad", owned_squad, "--horizon", "3",
+    ])
+
+    assert R.main() == 0
+    got = _TransferRecorder.seen[0]
+    expected = sum(X.ModelConfig(horizon=3).horizon_decay ** i for i in range(3))
+    assert got["horizon_weight"] == pytest.approx(expected)
+    assert got["horizon_weight"] < 3.0, "horizon 3 must weigh less than horizon 5"

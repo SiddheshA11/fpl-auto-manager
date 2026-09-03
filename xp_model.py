@@ -724,6 +724,21 @@ class XPModel:
                     out[tid] = when
         return out
 
+    def _upcoming_events(self) -> list[int]:
+        """
+        Every remaining gameweek, in order, from the one FPL marks `is_next`.
+
+        Cached because `_availability` asks once per gameweek scored and this
+        walks the whole calendar. Deliberately not truncated to any horizon:
+        callers score different numbers of gameweeks and the distance to a
+        gameweek is not one of the things that should vary between them.
+        """
+        cached = getattr(self, "_upcoming_cache", None)
+        if cached is None:
+            cached = next_events(self.bootstrap, len(self.bootstrap.get("events", [])))
+            self._upcoming_cache = cached
+        return cached
+
     def _availability(self, event: int | None = None) -> pd.Series:
         """
         P(player is fit and selectable), for `event` specifically.
@@ -751,8 +766,21 @@ class XPModel:
             return base
         kickoffs = self._return_dates_by_team(event)
 
-        events = next_events(self.bootstrap, self.config.horizon)
-        ahead = events.index(event) if event in events else 0
+        # How far away the gameweek is, as a fact about the calendar - not
+        # about how far the optimiser happens to look.
+        #
+        # This read next_events(bootstrap, self.config.horizon). Production
+        # scores max(HORIZON, chips.PLANNING_HORIZON) = 10 gameweeks while
+        # config.horizon is 5, so every event past the fifth was absent from
+        # that list and `ahead` fell to its 0 default. Both things keyed on it
+        # then stopped silently: decay_doubt is guarded by `ahead > 0`, so a
+        # knock healed through GW5 and un-healed at GW6 - measured at 0.7300
+        # rising to 0.9831 and then straight back to 0.7300 - and
+        # _suspension_risk returns early on `ahead <= 0`, pricing an
+        # accumulating ban at zero for exactly the gameweeks the chip planner
+        # reads.
+        upcoming = self._upcoming_events()
+        ahead = upcoming.index(event) if event in upcoming else 0
 
         out = base.copy()
         # A doubt fades; an absence does not. Decaying from a base of zero would
