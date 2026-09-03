@@ -57,9 +57,24 @@ jobs:
 
   manage-team:
     needs: gate
+    # Fails OPEN, deliberately. `needs: gate` alone would skip this job
+    # whenever the gate errored, so a crash in a cheap optimisation step
+    # would silently cost a gameweek - the same class of failure as the dead
+    # scheduler this whole rework exists to remove. This runs unless the gate
+    # said 'false' explicitly, and always() is required or a failed
+    # dependency skips the job before the `if` is ever evaluated.
+    #
+    # Safe because the gate does not enforce the window: manager.py
+    # re-checks the deadline and the submission marker itself under
+    # --respect-window, and a run that arrives here out of window exits 0
+    # having done nothing. The gate exists to avoid 20-odd needless FPL
+    # logins a day against a single-use rotating token, not to be correct.
+    #
     # A manual dispatch is a deliberate act and runs whatever the gate says;
     # that is also the path the watchdog uses to remediate a missed gameweek.
-    if: github.event_name != 'schedule' || needs.gate.outputs.should_run == 'true'
+    if: >-
+      always() &&
+      (github.event_name != 'schedule' || needs.gate.outputs.should_run != 'false')
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

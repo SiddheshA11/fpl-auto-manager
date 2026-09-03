@@ -178,9 +178,11 @@ def test_the_real_transport_posts_json_and_reads_the_status():
             received["path"] = self.path
             received["json"] = _json.loads(body)
             received["content_type"] = self.headers["Content-Type"]
+            payload = b'{"ok":true}'
             self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
-            self.wfile.write(b'{"ok":true}')
+            self.wfile.write(payload)
 
         def log_message(self, *a):
             pass
@@ -207,9 +209,16 @@ def test_the_real_transport_returns_http_errors_rather_than_raising():
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
+            # Drain the request body before replying. Leaving it unread makes
+            # the close send an RST, which surfaces as an intermittent
+            # ConnectionResetError in the client - a flaky test in this repo is
+            # worse than no test.
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = b"Unauthorized"
             self.send_response(401)
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(b"Unauthorized")
+            self.wfile.write(body)
 
         def log_message(self, *a):
             pass
