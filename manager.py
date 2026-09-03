@@ -20,12 +20,16 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 
 import pandas as pd
 
 import chips
+import deadline_state
+import github_api
+import notify
 import optimizer as optimizer_mod
 import priors
 import xp_model as X
@@ -192,35 +196,71 @@ def _pair_by_position(transfers_in: list[int], transfers_out: list[int],
     return paired_in, paired_out
 
 
-# The cron runs daily and this decides whether today is the day.
-#
-# A fixed Friday cron cannot work: deadlines land on Sat 26 times, Fri 5, Wed 5
-# and Sun 2 across 2026-27, and the five Wednesday midweek rounds - GW13, 18,
-# 20, 25 and 28 - have NO Friday between the previous deadline and their own.
-# Those five gameweeks got no run at all, carrying a stale squad and lineup
-# into them. The same cron also fired up to three times for other gameweeks,
-# once with a lead of 362 hours, acting on data a fortnight old.
-#
-# The window is 24 hours wide on purpose. Narrower risks missing a deadline
-# when a run fails; wider lets two daily runs both fall inside it and
-# reintroduces the double-submission the disabled scheduler was killed for.
-# Verified over all 38 gameweeks of 2026-27: 38 covered, 0 missed, 0 doubles,
-# leads between 2.5 and 25.0 hours.
-DEADLINE_WINDOW_MIN = 2.0    # closer than this and a submission may not land
-DEADLINE_WINDOW_MAX = 26.0
+# The acting window and the calendar arithmetic live in deadline_state, so the
+# hourly gate job can evaluate them without importing pandas, priors or this
+# module. Re-exported here because callers and tests reference manager.*, and
+# because this run re-checks the window itself rather than trusting the gate.
+DEADLINE_WINDOW_MIN = deadline_state.DEADLINE_WINDOW_MIN
+DEADLINE_WINDOW_MAX = deadline_state.DEADLINE_WINDOW_MAX
 
 
 def hours_to_deadline(event: dict, now: datetime | None = None) -> float | None:
     """Hours from `now` until this gameweek's deadline, or None if unknown."""
-    raw = event.get("deadline_time")
-    if not raw:
+    return deadline_state.hours_to_deadline(event, now)
+
+
+def _github() -> github_api.GitHubRepo | None:
+    """The API client, or None when this is not running in CI."""
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
+    if not repo or not token:
+        return None
+    return github_api.GitHubRepo(repo, token)
+
+
+def _marker_gameweek() -> int | None:
+    """The gameweek last submitted for, per the repo variable."""
+    gh = _github()
+    if gh is None:
+        # A local run has no marker and must not be blocked by its absence.
         return None
     try:
-        deadline = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        return int(str(gh.get_variable(github_api.MARKER_VARIABLE)).strip())
     except (TypeError, ValueError):
         return None
-    now = now or datetime.now(timezone.utc)
-    return (deadline - now).total_seconds() / 3600.0
+
+
+def _record_submission(event_id: int) -> None:
+    """
+    Record that this gameweek is done. Failure to record is logged, never
+    raised: the squad is already in, and losing the marker costs at worst a
+    redundant run and a spurious watchdog alert - both far cheaper than
+    failing a run that already succeeded.
+    """
+    gh = _github()
+    if gh is None:
+        logger.info("no GitHub credentials; not recording the submission marker")
+        return
+    if gh.set_variable(github_api.MARKER_VARIABLE, str(event_id)):
+        logger.info("recorded GW%d as submitted", event_id)
+        return
+
+    # This is worse than it looks and must not pass as a warning in a log
+    # nobody reads. The marker is the only thing that tells the watchdog this
+    # gameweek is handled. Unset, the watchdog will conclude nothing was
+    # submitted and dispatch the weekly run again a few hours from now - and
+    # that run authenticates, finds the free transfers already spent, and may
+    # take a -4 to do something with them. The usual cause is a GH_PAT without
+    # permission to write repository variables.
+    logger.error("could not record the GW%d submission marker. The team IS submitted. "
+                 "The watchdog will not know that and may resubmit; check GH_PAT can "
+                 "write repository variables.", event_id)
+    notify.from_env().send(
+        f"*FPL weekly run*\n\nGW{event_id} was submitted, but the "
+        f"`{github_api.MARKER_VARIABLE}` marker could not be written. The watchdog "
+        "cannot see that this gameweek is done and may dispatch a second run, "
+        "which could take a hit. Check GH_PAT can write repository variables."
+    )
 
 
 def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2) -> dict | None:
@@ -247,6 +287,16 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     event_id = int(next_event["id"])
 
     if respect_window:
+        # The marker makes the hourly schedule idempotent. Four ticks qualify
+        # per gameweek so that a dropped or delayed run has three retries
+        # behind it; without this check those retries would each submit again.
+        # A second run is not harmless: it re-optimises with the free transfers
+        # already spent, so it can only improve the squad by taking a hit.
+        already = _marker_gameweek()
+        if already is not None and already == event_id:
+            logger.info("GW%d has already been submitted; nothing to do", event_id)
+            return {"status": "already-submitted", "event_id": event_id}
+
         lead = hours_to_deadline(next_event)
         if lead is None:
             logger.warning("GW%d has no deadline_time; proceeding rather than skipping", event_id)
@@ -255,7 +305,12 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
                 "GW%d deadline is %.1fh away, outside the %g-%gh window; nothing to do",
                 event_id, lead, DEADLINE_WINDOW_MIN, DEADLINE_WINDOW_MAX,
             )
-            return None
+            # A status dict, not None. None means "this run broke" and exits 1;
+            # deciding correctly that today is not the day is a healthy no-op.
+            # Conflating the two marked six runs in seven as failures and made
+            # "was there a successful run before the deadline" unanswerable,
+            # which is the exact question the watchdog has to answer.
+            return {"status": "skipped", "event_id": event_id, "lead_hours": lead}
         else:
             logger.info("GW%d deadline is %.1fh away; proceeding", event_id, lead)
 
@@ -450,10 +505,18 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     lineup_chip = decision.chip if decision.chip in ("bboost", "3xc") else None
     picks = _picks_payload(plan, lineup_chip)
 
+    lineup_ok = True
     if not dry_run:
         if client.set_lineup(picks, chip=lineup_chip) is not None:
             logger.info("lineup submitted")
+            # Only now is the gameweek genuinely done. Recording the marker on
+            # a failed submission would tell the watchdog to stand down over a
+            # team that never went in - the exact silence this all exists to
+            # remove. Leaving it unset makes the next hourly tick retry, and
+            # the watchdog alert if those run out.
+            _record_submission(event_id)
         else:
+            lineup_ok = False
             logger.error("lineup submission failed")
     else:
         logger.info("[dry run] not submitting lineup")
@@ -465,6 +528,7 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     logger.info("=" * 60)
 
     return {
+        "status": "dry-run" if dry_run else ("submitted" if lineup_ok else "lineup-failed"),
         "event_id": event_id,
         "transfers_in": plan.transfers_in,
         "transfers_out": plan.transfers_out,
@@ -490,7 +554,9 @@ def main() -> int:
     if result is None:
         return 1
     print(json.dumps(result, indent=2, default=str))
-    return 0
+    # A lineup that did not go in is a failed run, even though everything
+    # before it worked. It previously logged an error and exited 0.
+    return 1 if result.get("status") == "lineup-failed" else 0
 
 
 if __name__ == "__main__":

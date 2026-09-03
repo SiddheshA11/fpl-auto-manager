@@ -47,8 +47,14 @@ jobs:
           test -s data/history/2025-26/merged_gw.csv || { echo "history missing"; exit 1; }
           test -n "$(ls data/snapshots/bootstrap-static_*.json.gz 2>/dev/null)" || { echo "no snapshot"; exit 1; }
 
+      # -rs prints why anything skipped. Four separate suspension tests once
+      # "passed" in CI by not running at all - their helpers selected players
+      # on start_rate > 0.8, which a week into a season is nobody. That is the
+      # fifth green-suite-proving-nothing incident in this repo, and it is
+      # invisible without this flag: CI fetches a live snapshot while local
+      # uses the committed one, so the two disagree about what is skippable.
       - name: Run tests
-        run: python3 -m pytest tests/ -q
+        run: python3 -m pytest tests/ -q -rs
 
       # Deprecations are how the next pandas major will announce itself. Kept
       # non-blocking so it reports rather than blocks, but it does report.
