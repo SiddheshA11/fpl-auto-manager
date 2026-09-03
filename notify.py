@@ -13,15 +13,23 @@ Two rules govern everything here:
     fail the run. Every path returns a bool and logs, and none of them raise.
   - a missing secret is a loud no-op, not a crash. A fresh clone with no .env
     still runs.
+
+stdlib only, deliberately. The deadline watchdog imports this and installs no
+dependencies at all - it has to survive the failures it reports on, including a
+broken dependency install. Using `requests` here made that claim false and the
+watchdog died on `ModuleNotFoundError` on its very first scheduled run, taking
+its own failure-reporting step down with it. Silently, which is the one outcome
+this module exists to prevent.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.request
 from typing import Callable, Protocol
-
-import requests
 
 logger = logging.getLogger("fpl_auto")
 
@@ -33,6 +41,33 @@ BACKOFF_BASE = 2.0
 
 # Telegram rejects anything longer. Truncate rather than lose the message.
 MAX_MESSAGE_CHARS = 4096
+
+
+class _Response:
+    """The two attributes the retry logic reads, so the seam matches requests."""
+
+    def __init__(self, status_code: int, text: str = ""):
+        self.status_code = status_code
+        self.text = text
+
+
+def _urllib_post(url: str, payload: dict, timeout: int) -> _Response:
+    """
+    POST JSON with the standard library.
+
+    An HTTP error is a response, not an exception, so the caller's retry policy
+    can tell 429 from 401 rather than treating every failure as transient.
+    """
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    with_err = None
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https host
+            return _Response(resp.status, resp.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        with_err = _Response(e.code, e.read().decode("utf-8", "replace"))
+    return with_err
 
 
 class Notifier(Protocol):
@@ -67,7 +102,7 @@ class TelegramNotifier:
                  sleep: Callable[[float], None] = time.sleep):
         self._token = token
         self._chat_id = chat_id
-        self._post = transport or (lambda url, json, timeout: requests.post(url, json=json, timeout=timeout))
+        self._post = transport or _urllib_post
         self._sleep = sleep
 
     def send(self, text: str) -> bool:

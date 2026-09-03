@@ -50,11 +50,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Deliberately no `pip install -r requirements.txt`. watchdog.py,
-      # deadline_state.py, github_api.py and notify.py are stdlib-only apart
-      # from notify's use of requests, which is present on the runner image.
-      # A dependency resolution failure has already shipped one silent bug in
-      # this repo; the watchdog must not be able to die of one.
+      # Deliberately no `pip install`. watchdog.py, deadline_state.py,
+      # github_api.py and notify.py are stdlib-only, and a test enforces that
+      # the whole import graph stays that way.
+      #
+      # It did not, once. notify.py imported `requests`, which is NOT present
+      # under actions/setup-python, so the first scheduled watchdog run died
+      # with ModuleNotFoundError - and the "report that the watchdog failed"
+      # step below died of the same import, making the failure completely
+      # silent. That is the exact outcome this workflow exists to prevent, so
+      # do not add a dependency here to fix an import; remove the import.
       - name: Run the watchdog
         env:
           GITHUB_REPOSITORY: ${{ github.repository }}
