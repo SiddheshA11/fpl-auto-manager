@@ -20,9 +20,31 @@ import priors
 import xp_model as X
 
 SNAPS = Path(__file__).resolve().parent.parent / "data" / "snapshots"
-SQUAD_NAMES = ["Sels", "Tarkowski", "Thiaw", "Collins", "B.Fernandes", "Mbeumo",
-               "Rice", "Gibbs-White", "Ndiaye", "Watkins", "Evanilson",
-               "Sánchez", "Virgil", "Milenković", "Woltemade"]
+# A reference squad used to be fifteen hardcoded web_names. That is a
+# season-drift bug: CI fetches a LIVE snapshot while local uses the committed
+# pre-season one, so as soon as any of those fifteen left the game or was
+# renamed the test failed in CI only, and `len(ids) == 15` was the symptom.
+# Built from the pool by position quota instead, which is stable for as long
+# as the Premier League fields footballers.
+# Keyed by FPL element_type, which is what the scored frame carries.
+SQUAD_BY_POSITION = {1: 2, 2: 5, 3: 5, 4: 3}   # GK, DEF, MID, FWD
+
+
+def _reference_squad(scored) -> list[int]:
+    """
+    A legal 15 drawn from the pool: the best available by horizon xP, subject
+    to the real position quota. Stable across seasons and transfer windows,
+    unlike a list of names.
+
+    Ordered GK, DEF, MID, FWD so callers can slice ids[:11] as an XI and
+    ids[11:] as a bench and get something plausible.
+    """
+    avail = scored[scored["status"].isin(["a", "d"])] if "status" in scored.columns else scored
+    out = []
+    for pos, count in SQUAD_BY_POSITION.items():
+        block = avail[avail["position"] == pos].nlargest(count, "xp_horizon")
+        out.extend(int(i) for i in block["id"])
+    return out
 
 
 def _state(fixtures=None, scoring=None):
@@ -36,8 +58,7 @@ def _state(fixtures=None, scoring=None):
     model = X.XPModel(bootstrap, fx, ps, X.ModelConfig(horizon=chips.PLANNING_HORIZON))
     events = X.next_events(bootstrap, scoring or chips.PLANNING_HORIZON)
     scored = model.expected_points(events)
-    ids = [int(scored.loc[scored["web_name"] == n, "id"].iloc[0]) for n in SQUAD_NAMES
-           if (scored["web_name"] == n).any()]
+    ids = _reference_squad(scored)
     return bootstrap, fx, scored, events, ids
 
 
@@ -56,23 +77,33 @@ def _with_double(fixtures, event):
 
 def test_a_chip_is_held_for_a_double_gameweek_ahead_of_it():
     """The behaviour the whole planner exists to produce."""
-    base_bs, base_fx, *_ = _state()
-    doubled = _with_double(base_fx, 6)
+    base_bs, base_fx, _, base_events, _ = _state()
+    # Relative to the live horizon, never a literal gameweek number. This read
+    # `6` and passed locally against the pre-season snapshot while failing in
+    # CI from GW6 onwards, because CI fetches a live one and GW6 had passed:
+    # the fabricated double landed outside the planning horizon entirely.
+    target = base_events[min(5, len(base_events) - 1)]
+    assert target != base_events[0], "need a gameweek ahead of the current one"
+
+    doubled = _with_double(base_fx, target)
     bootstrap, fx, scored, events, ids = _state(doubled)
-    assert len(ids) == 15, "snapshot no longer contains the reference squad"
+    assert len(ids) == 15, "could not assemble a legal reference squad from the pool"
 
     engine = chips.ChipEngine(bootstrap, fx, scored)
     horizon = chips.plan_horizon(bootstrap, events[0], {"bboost", "3xc"})
     values = engine.value_by_gameweek(events[0], {"bboost", "3xc"}, ids, horizon)
 
-    assert values[("bboost", 6)] > 1.5 * values[("bboost", events[0])], (
+    assert ("bboost", target) in values, (
+        f"GW{target} was not valued; it must be inside the planning horizon"
+    )
+    assert values[("bboost", target)] > 1.5 * values[("bboost", events[0])], (
         "a double gameweek must be worth substantially more than an ordinary one"
     )
 
     decision = engine.evaluate(events[0], {"chips": []}, xi_ids=ids[:11],
                                bench_ids=ids[11:], captain_id=ids[4], squad_ids=ids)
     assert decision.chip is None, "must not spend the chip this week"
-    assert "GW6" in decision.reason and "holding" in decision.reason
+    assert f"GW{target}" in decision.reason and "holding" in decision.reason
 
 
 def test_an_ordinary_run_of_gameweeks_plays_nothing():
