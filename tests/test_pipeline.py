@@ -285,3 +285,55 @@ def test_a_marker_from_a_previous_gameweek_does_not_block_this_one(stub, marker,
     assert result["status"] == "submitted"
     assert stub.submitted_lineup is not None
     assert marker == [event_id]
+
+
+def test_a_live_run_records_its_predictions(stub, marker, monkeypatch):
+    """
+    Covers the call site, not the helper. This repo has shipped four bugs of
+    the form "the helper is correct and nobody calls it", so a ledger with
+    passing unit tests and no caller is the expected failure mode.
+    """
+    import ledger
+
+    seen = []
+    monkeypatch.setattr(ledger, "record_submission",
+                        lambda gh, **kw: seen.append(kw) or True)
+
+    result = manager.run_weekly_cycle(dry_run=False)
+
+    assert stub.submitted_lineup is not None, "precondition: must have submitted"
+    assert len(seen) == 1, "the run submitted a team and recorded no predictions"
+    kw = seen[0]
+    assert kw["event_id"] == result["event_id"]
+    assert kw["captain"] == result["captain"]
+    assert len(kw["plan"].squad) == 15
+    assert "xp_next" in kw["scored"].columns
+
+
+def test_a_dry_run_records_no_predictions(stub, marker, monkeypatch):
+    """A dry run would otherwise overwrite the real gameweek's record."""
+    import ledger
+
+    seen = []
+    monkeypatch.setattr(ledger, "record_submission", lambda gh, **kw: seen.append(kw) or True)
+    manager.run_weekly_cycle(dry_run=True)
+    assert seen == []
+
+
+def test_a_failing_ledger_does_not_fail_a_submitted_run(stub, marker, monkeypatch):
+    """
+    The team is already in by the time this runs. Losing the record is worth
+    far less than the submission it describes, so it must not turn a successful
+    gameweek into a failed run.
+    """
+    import ledger
+
+    def boom(gh, **kw):
+        raise RuntimeError("contents API down")
+
+    monkeypatch.setattr(ledger, "record_submission", boom)
+
+    result = manager.run_weekly_cycle(dry_run=False)
+
+    assert result is not None and result["status"] == "submitted"
+    assert stub.submitted_lineup is not None

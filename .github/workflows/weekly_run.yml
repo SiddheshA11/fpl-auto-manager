@@ -156,4 +156,8 @@ jobs:
         with:
           name: fpl-run-logs-${{ github.run_number }}
           path: fpl_run_*.log
-          retention-days: 30
+          # 90 is the maximum. Diagnosing the GW1-5 decline needed the per-run
+          # logs and GW1-3 had already expired at 30 days, so the post-mortem
+          # had to guess. The prediction ledger is the real fix; this is the
+          # cheap backstop for everything the ledger does not capture.
+          retention-days: 90
