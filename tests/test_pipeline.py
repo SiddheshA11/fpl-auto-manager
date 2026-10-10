@@ -285,3 +285,38 @@ def test_a_marker_from_a_previous_gameweek_does_not_block_this_one(stub, marker,
     assert result["status"] == "submitted"
     assert stub.submitted_lineup is not None
     assert marker == [event_id]
+
+
+def test_a_dispatched_run_also_respects_the_marker(stub, marker, monkeypatch):
+    """
+    The marker check used to live inside the --respect-window branch, so a
+    manual dispatch ignored it - including the watchdog's own remediation
+    dispatch. With the watchdog now triggering at 6h while the run's band
+    reaches 8h, that left a real race: the watchdog dispatches, a scheduled
+    tick is already acting, and both submit - the second with its free
+    transfers spent and a -4 available to spend them.
+    """
+    event_id = int(stub.get_next_event()["id"])
+    monkeypatch.setattr(manager, "_marker_gameweek", lambda: event_id)
+
+    result = manager.run_weekly_cycle(dry_run=False, respect_window=False)
+
+    assert result["status"] == "already-submitted"
+    assert stub.submitted_lineup is None, "a dispatch resubmitted an already-done gameweek"
+    assert stub.submitted_transfers is None
+    assert marker == []
+
+
+def test_force_overrides_the_marker(stub, marker, monkeypatch):
+    """
+    Deliberately resubmitting a gameweek has to stay possible, or the only
+    escape from a wrong submission is editing a repo variable by hand.
+    """
+    event_id = int(stub.get_next_event()["id"])
+    monkeypatch.setattr(manager, "_marker_gameweek", lambda: event_id)
+
+    result = manager.run_weekly_cycle(dry_run=False, respect_window=False, force=True)
+
+    assert result["status"] == "submitted"
+    assert stub.submitted_lineup is not None
+    assert marker == [event_id]

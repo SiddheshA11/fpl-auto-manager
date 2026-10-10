@@ -30,23 +30,34 @@ REQUEST_TIMEOUT = 30
 
 # The band in which the weekly run is allowed to act.
 #
-# MAX was 26.0, paired with a daily 10:00 cron. That combination gave exactly
-# one qualifying tick per gameweek for all 38 - a 24h-wide window sampled every
-# 24h - so a single dropped or delayed run missed the deadline outright, which
-# is what happened to GW2 on 2026-08-28: the 10:00 tick never fired and a run
-# appeared at 21:02, three and a half hours after the deadline.
+# These numbers are measured, not argued. GitHub throttles this repo's hourly
+# cron to ~5.5 arrivals a day with a median gap of 4.24h and a maximum of
+# 9.57h, so a narrow band is simply not hit often enough.
 #
-# Widening naively makes it worse, not better. Measured against the real
-# 2026-27 calendar, a 6-hourly cron on the old 2-26h band gives four ticks per
-# gameweek but the *first* one acts, at a lead of 22.0-25.5h - so the bot would
-# decide every week on day-old team news.
+# GW6 of 2026-27 is the proof. Three runs arrived that day: 8.51h out (too
+# early for the old band), 1.94h out, and after the deadline. The middle one
+# was 3.6 MINUTES short of the old 2.0h floor, so it skipped, and the deadline
+# passed with no submission at all.
 #
-# A narrow late band sampled often gives redundancy without that cost. Hourly
-# on 2-6h: four qualifying ticks for every one of the 38 gameweeks, the acting
-# tick at a lead of 5.0-5.5h, and three spare attempts behind it. Compare the
-# old 2.5-25.0h spread of acting leads, with no retry at all.
-DEADLINE_WINDOW_MIN = 2.0    # closer than this and a submission may not land
-DEADLINE_WINDOW_MAX = 6.0
+# Bootstrapping the observed gap distribution over all 38 real deadlines:
+#
+#     band          P(a tick lands in it)
+#     [2.0, 6.0)          81.3%     <- what lost GW6
+#     [0.5, 6.0)          94.5%
+#     [0.5, 8.0)          99.8%
+#     [0.25, 12.0)       100.0%
+#
+# MIN is 0.5 rather than 2.0 because the old floor protected nothing. FPL
+# accepts changes until the deadline itself; half an hour is ample for a run
+# that takes about ninety seconds, and the rejected GW6 run had nearly two
+# hours in hand.
+#
+# MAX stays as tight as coverage allows, because the FIRST qualifying tick is
+# the one that acts - so a wide upper bound means deciding on stale team news.
+# At 8.0h the acting lead is bounded by 8h; widening to 24h would buy nothing
+# (coverage is already 99.8%) and would cost a day of freshness.
+DEADLINE_WINDOW_MIN = 0.5    # a submission still lands comfortably
+DEADLINE_WINDOW_MAX = 8.0
 
 
 def _fetch(url: str, timeout: int = REQUEST_TIMEOUT) -> dict:
