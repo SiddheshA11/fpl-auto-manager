@@ -195,3 +195,93 @@ def test_aborts_cleanly_when_authentication_fails(game_state, monkeypatch):
     monkeypatch.setattr(manager, "FPLClient", lambda: DeadClient(bootstrap, fixtures, [], {}))
 
     assert manager.run_weekly_cycle(dry_run=True) is None, "must abort, not crash"
+
+
+# ---------------------------------------------------------- submission marker
+#
+# FPL_LAST_SUBMITTED_GW is what the watchdog reads to decide whether a gameweek
+# was actually handled, and what makes the hourly schedule idempotent. Both
+# depend on it being written by the real submit path and nowhere else.
+#
+# These are end-to-end on purpose. This repo has already shipped four bugs of
+# the form "the helper is correct and nobody calls it", one of them in exactly
+# this shape: recommend.py passed no ownership_weight, so the preview tool
+# optimised at 0.0 while production used +0.20, with the helper's own tests
+# green throughout.
+
+
+@pytest.fixture
+def marker(monkeypatch):
+    """Captures what the run records, without a GitHub API."""
+    written = []
+    monkeypatch.setattr(manager, "_record_submission", lambda gw: written.append(gw))
+    return written
+
+
+def test_a_live_run_records_the_gameweek_it_submitted(stub, marker):
+    result = manager.run_weekly_cycle(dry_run=False)
+
+    assert stub.submitted_lineup is not None, "precondition: the run must have submitted"
+    assert marker == [result["event_id"]], (
+        "a submitted gameweek must be recorded, or the watchdog will report a "
+        "false alarm and the next hourly tick will submit again"
+    )
+    assert result["status"] == "submitted"
+
+
+def test_a_dry_run_records_nothing(stub, marker):
+    """
+    Recording a dry run would tell the watchdog to stand down over a team that
+    was never submitted - the precise silence this machinery exists to remove.
+    """
+    manager.run_weekly_cycle(dry_run=True)
+
+    assert stub.submitted_lineup is None
+    assert marker == []
+
+
+def test_a_failed_lineup_submission_records_nothing_and_fails(stub, marker, monkeypatch):
+    """
+    set_lineup returning None used to be logged and otherwise ignored: the run
+    exited 0 having submitted nothing. That is the failure mode the watchdog
+    cannot see unless the marker stays unset and the run goes red.
+    """
+    monkeypatch.setattr(stub, "set_lineup", lambda picks, chip=None: None)
+
+    result = manager.run_weekly_cycle(dry_run=False)
+
+    assert marker == [], "nothing was submitted, so nothing may be recorded"
+    assert result["status"] == "lineup-failed"
+
+
+def test_an_already_submitted_gameweek_is_not_submitted_again(stub, marker, monkeypatch):
+    """
+    The hourly schedule gives each gameweek four qualifying ticks so a dropped
+    run has retries. Without this check those retries each resubmit, which is
+    the double submission the old single-tick schedule existed to prevent.
+    """
+    event_id = stub.get_next_event()["id"]
+    monkeypatch.setattr(manager, "_marker_gameweek", lambda: int(event_id))
+
+    result = manager.run_weekly_cycle(dry_run=False, respect_window=True)
+
+    assert result["status"] == "already-submitted"
+    assert stub.submitted_lineup is None, "a second tick must not resubmit"
+    assert stub.submitted_transfers is None
+    assert marker == []
+
+
+def test_a_marker_from_a_previous_gameweek_does_not_block_this_one(stub, marker, monkeypatch):
+    """
+    Guards the direction that fails silently: a stale marker that blocked every
+    subsequent gameweek would look exactly like a healthy quiet season.
+    """
+    event_id = int(stub.get_next_event()["id"])
+    monkeypatch.setattr(manager, "_marker_gameweek", lambda: event_id - 1)
+    monkeypatch.setattr(manager, "hours_to_deadline", lambda *a, **k: 5.0)
+
+    result = manager.run_weekly_cycle(dry_run=False, respect_window=True)
+
+    assert result["status"] == "submitted"
+    assert stub.submitted_lineup is not None
+    assert marker == [event_id]
