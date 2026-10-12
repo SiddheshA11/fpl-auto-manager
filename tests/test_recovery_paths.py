@@ -109,8 +109,9 @@ def test_the_lineup_is_reoptimised_on_the_coming_gameweek(game_state, monkeypatc
 
     calls = []
     original = manager._reoptimise_lineup
-    monkeypatch.setattr(manager, "_reoptimise_lineup",
-                        lambda plan, scored: calls.append(1) or original(plan, scored))
+    monkeypatch.setattr(
+        manager, "_reoptimise_lineup",
+        lambda plan, scored, tilt: calls.append(1) or original(plan, scored, tilt))
 
     result = manager.run_weekly_cycle(dry_run=False)
     assert result is not None

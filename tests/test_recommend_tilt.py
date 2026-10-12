@@ -20,6 +20,7 @@ import pytest
 
 import optimizer as O
 import recommend as R
+import rivals
 import xp_model as X
 
 REPO = Path(__file__).resolve().parent.parent
@@ -50,31 +51,55 @@ def _snapshot_exists():
         pytest.skip("no bootstrap snapshot committed")
 
 
-def test_recommend_hands_the_configured_tilt_to_the_optimiser(monkeypatch, capsys):
+def test_recommend_hands_the_shared_tilt_to_the_optimiser(monkeypatch, capsys):
+    """
+    The preview must aim at whatever the weekly run aims at. It previously
+    passed no ownership_weight at all and silently optimised at optimizer.py's
+    0.0 while manager.py used +0.20 - a different squad, no Haaland, 0.56 xP
+    short. The tilt now comes from one shared helper; this asserts the value
+    that helper returns is what actually reaches the solver.
+    """
     _Recorder.seen = []
     monkeypatch.setattr(R, "SquadOptimizer", _Recorder)
-    monkeypatch.setattr(R, "OWNERSHIP_WEIGHT", SENTINEL, raising=False)
+
+    sentinel = rivals.TiltInputs(scored=None, ownership_col="field_ownership",
+                                 ownership_weight=SENTINEL, captain_weight=0.11,
+                                 source="test")
+
+    def fake(scored, entry_id, event):
+        sentinel.scored = scored
+        return sentinel
+
+    monkeypatch.setattr(R.rivals, "tilt_inputs", fake)
     monkeypatch.setattr("sys.argv", ["recommend.py", "--offline", "--build", "--horizon", "1"])
 
     assert R.main() == 0
-
     assert _Recorder.seen, "recommend.py never constructed a SquadOptimizer"
     got = _Recorder.seen[0]
-    assert "ownership_weight" in got, (
-        "recommend.py passed no ownership_weight, so it silently optimises at "
-        f"optimizer.OWNERSHIP_WEIGHT ({O.OWNERSHIP_WEIGHT}) while manager.py uses "
-        "config.OWNERSHIP_WEIGHT - the preview and the submission disagree"
-    )
-    assert got["ownership_weight"] == pytest.approx(SENTINEL)
+    assert got.get("ownership_weight") == pytest.approx(SENTINEL)
+    assert got.get("ownership_col") == "field_ownership"
+    assert got.get("captain_ownership_weight") == pytest.approx(0.11)
 
 
-def test_recommend_and_manager_read_the_same_setting():
-    """Both must read config, not optimizer's neutral module default."""
-    import config
+def test_every_caller_takes_its_tilt_from_the_same_place():
+    """
+    manager.py, recommend.py and deadline_check.py must not each decide this
+    for themselves. Two shipped bugs came from exactly that, and both were
+    invisible because every tilt argument defaults to something plausible
+    rather than failing.
+    """
+    import deadline_check
     import manager
 
-    assert R.OWNERSHIP_WEIGHT is config.OWNERSHIP_WEIGHT
-    assert manager.OWNERSHIP_WEIGHT is config.OWNERSHIP_WEIGHT
+    for mod in (manager, R, deadline_check):
+        assert getattr(mod, "rivals", None) is rivals, (
+            f"{mod.__name__} does not go through rivals.tilt_inputs, so its "
+            "tilt can drift from the weekly run's without any test noticing"
+        )
+        assert not hasattr(mod, "OWNERSHIP_WEIGHT"), (
+            f"{mod.__name__} still reads a module-level OWNERSHIP_WEIGHT; that "
+            "is the second source of truth this helper exists to remove"
+        )
 
 
 # ------------------------------------------------------------- horizon_weight
