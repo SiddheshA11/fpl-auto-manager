@@ -729,11 +729,34 @@ Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
    on how "credible" is defined, and turns *positive* at some thresholds.
    -0.611 is what alpha 1.0 produces, not alpha 1.5.
 
-   **alpha 1.0 is a live candidate but is NOT shipped.** +0.005 R2 is
-   comparable to the entire goals/assists/clean-sheet apparatus (0.004), but
-   it changes squad selection, so it needs `simulate.py` with a control
-   against the 141-point noise floor before it goes anywhere near production.
-   The accuracy sweep is in-sample over the four seasons used to pick it.
+   **alpha 1.0 is MEASURED, DEAD.** It was a live candidate on +0.005 R2 - 
+   comparable to the entire goals/assists/clean-sheet apparatus - and the
+   decision side kills it. `measure_competition_alpha.py --decisions` replays
+   four seasons with horizon sweeps as controls:
+
+```
+   config            n     mean      sd    min    max   reading
+   alpha=1.0 h=5     4    -39.8    56.3   -127    +24   candidate
+   alpha=1.25 h=5    4    +12.0    40.0    -52    +53   candidate
+   alpha=1.5  h=4    4     -7.2    90.3   -120   +106   CONTROL
+   alpha=1.5  h=6    4    -98.0    82.1   -240    -43   CONTROL
+```
+
+   The value that wins on R2 loses 39.8 points a season when decisions are
+   actually replayed. alpha 1.25 gains 12.0 with an sd of 40.0, which is
+   nothing. And both controls - changing the horizon, which is not a strategy
+   change - move the total by more than either candidate does.
+
+   So this constant is closed in all three directions: sharper costs accuracy,
+   softer costs points, and the depth correlation it was supposed to fix moves
+   the wrong way either side of production. Do not retune it.
+
+   A note on cost, because an earlier version of this file was wrong about it:
+   a full season replays in ~50 seconds and the whole sweep is ~15 minutes.
+   The first timing attempt reported ~100 minutes per season, which was wall
+   clock dominated by the history download, not compute - 27s of user CPU over
+   78 minutes at 0% CPU. There is no need to move these measurements off a
+   laptop.
 
 ## Process failures from 2026-08-28, worth not repeating
 
