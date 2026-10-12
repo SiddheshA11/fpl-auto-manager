@@ -1,0 +1,244 @@
+{
+  "actuals": {
+    "1": {
+      "minutes": 90,
+      "total_points": 14
+    },
+    "115": {
+      "minutes": 90,
+      "total_points": 11
+    },
+    "127": {
+      "minutes": 83,
+      "total_points": 3
+    },
+    "229": {
+      "minutes": 90,
+      "total_points": 8
+    },
+    "249": {
+      "minutes": 90,
+      "total_points": 2
+    },
+    "304": {
+      "minutes": 90,
+      "total_points": 1
+    },
+    "305": {
+      "minutes": 90,
+      "total_points": 14
+    },
+    "346": {
+      "minutes": 77,
+      "total_points": 10
+    },
+    "368": {
+      "minutes": 90,
+      "total_points": 3
+    },
+    "388": {
+      "minutes": 90,
+      "total_points": 6
+    },
+    "411": {
+      "minutes": 90,
+      "total_points": 9
+    },
+    "426": {
+      "minutes": 90,
+      "total_points": 2
+    },
+    "427": {
+      "minutes": 90,
+      "total_points": 2
+    },
+    "497": {
+      "minutes": 0,
+      "total_points": 0
+    },
+    "542": {
+      "minutes": 90,
+      "total_points": 0
+    }
+  },
+  "record": {
+    "captain": 411,
+    "chip": null,
+    "event": 4,
+    "hits": 0,
+    "players": [
+      {
+        "cost": 6.0,
+        "id": 1,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Raya",
+        "p_start": 0.0,
+        "position": 1,
+        "started": true,
+        "xp_next": 3.85
+      },
+      {
+        "cost": 4.8,
+        "id": 115,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "De Cuyper",
+        "p_start": 0.0,
+        "position": 2,
+        "started": true,
+        "xp_next": 5.08
+      },
+      {
+        "cost": 6.0,
+        "id": 388,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Gu\u00e9hi",
+        "p_start": 0.0,
+        "position": 2,
+        "started": true,
+        "xp_next": 3.98
+      },
+      {
+        "cost": 6.0,
+        "id": 229,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Tarkowski",
+        "p_start": 0.0,
+        "position": 2,
+        "started": true,
+        "xp_next": 3.88
+      },
+      {
+        "cost": 12.0,
+        "id": 426,
+        "is_captain": false,
+        "is_vice_captain": true,
+        "name": "B.Fernandes",
+        "p_start": 0.0,
+        "position": 3,
+        "started": true,
+        "xp_next": 5.41
+      },
+      {
+        "cost": 7.0,
+        "id": 368,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Szoboszlai",
+        "p_start": 0.0,
+        "position": 3,
+        "started": true,
+        "xp_next": 4.81
+      },
+      {
+        "cost": 7.9,
+        "id": 427,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Mbeumo",
+        "p_start": 0.0,
+        "position": 3,
+        "started": true,
+        "xp_next": 4.81
+      },
+      {
+        "cost": 5.0,
+        "id": 127,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Gomez",
+        "p_start": 0.0,
+        "position": 3,
+        "started": true,
+        "xp_next": 4.09
+      },
+      {
+        "cost": 15.5,
+        "id": 411,
+        "is_captain": true,
+        "is_vice_captain": false,
+        "name": "Haaland",
+        "p_start": 0.0,
+        "position": 4,
+        "started": true,
+        "xp_next": 5.87
+      },
+      {
+        "cost": 5.6,
+        "id": 249,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Barry",
+        "p_start": 0.0,
+        "position": 4,
+        "started": true,
+        "xp_next": 4.33
+      },
+      {
+        "cost": 6.0,
+        "id": 346,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Calvert-Lewin",
+        "p_start": 0.0,
+        "position": 4,
+        "started": true,
+        "xp_next": 4.01
+      },
+      {
+        "cost": 4.0,
+        "id": 497,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Dubravka",
+        "p_start": 0.0,
+        "position": 1,
+        "started": false,
+        "xp_next": 0.18
+      },
+      {
+        "cost": 5.8,
+        "id": 542,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "E.Le F\u00e9e",
+        "p_start": 0.0,
+        "position": 3,
+        "started": false,
+        "xp_next": 3.6
+      },
+      {
+        "cost": 4.0,
+        "id": 305,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "Davis",
+        "p_start": 0.0,
+        "position": 2,
+        "started": false,
+        "xp_next": 2.81
+      },
+      {
+        "cost": 4.0,
+        "id": 304,
+        "is_captain": false,
+        "is_vice_captain": false,
+        "name": "O'Shea",
+        "p_start": 0.0,
+        "position": 2,
+        "started": false,
+        "xp_next": 2.61
+      }
+    ],
+    "recorded_at": "2026-09-12T10:02:21+00:00",
+    "schema": 1,
+    "tilt_source": "template",
+    "transfers_in": [],
+    "transfers_out": [],
+    "vice_captain": 426,
+    "xi_xp": 50.14
+  }
+}

@@ -40,7 +40,9 @@ def plan_and_scored():
         "id": [1, 2, 3, 4],
         "web_name": ["Raya", "Davis", "Haaland", "Dubravka"],
         "team_name": ["ARS", "IPS", "MCI", "TOT"],
-        "position": ["GK", "DEF", "FWD", "GK"],
+        # FPL element_type, as the real scored frame carries it. This fixture
+        # used to say "GK"/"DEF", a shape production never produces.
+        "position": [1, 2, 4, 1],
         "cost": [6.0, 4.0, 15.5, 4.0],
         "xp_next": [3.85, 2.81, 5.87, 0.18],
         "xp_horizon": [14.0, 10.2, 21.3, 0.6],
