@@ -99,10 +99,19 @@ def test_the_run_acts_on_fresh_news_not_day_old_news():
         )
 
 
-def test_no_submission_is_attempted_inside_the_dead_zone():
-    """Too close to the deadline and a submission may not land."""
+def test_no_submission_is_attempted_after_the_deadline_has_passed():
+    """
+    The floor exists to stop a run submitting into a closed deadline, and
+    nothing more. It was 2.0h on the argument that "a submission may not land"
+    closer than that, which protected nothing and cost GW6: a run with 1.94h
+    in hand skipped, 3.6 minutes short of the floor, and the gameweek went in
+    on a stale squad. See tests/test_gw6_miss.py.
+    """
     assert ds.in_acting_window(ds.DEADLINE_WINDOW_MIN - 0.1) is False
-    assert ds.in_acting_window(0.5) is False
+    assert ds.in_acting_window(0.0) is False
+    assert ds.in_acting_window(-1.0) is False
+    # ...but a run with well over an hour in hand must act.
+    assert ds.in_acting_window(1.94) is True
 
 
 def test_the_window_is_narrow_enough_to_stay_late():

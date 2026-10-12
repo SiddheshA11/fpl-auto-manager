@@ -52,15 +52,29 @@ logger = logging.getLogger("fpl_auto")
 WORKFLOW_TO_TRIGGER = "weekly_run.yml"
 
 # How close the deadline has to be before an unsubmitted gameweek is an
-# emergency rather than a normal state of affairs. The weekly run's own acting
-# window closes at DEADLINE_WINDOW_MIN (2h), and it acts at a lead of 5.0-5.5h
-# with three retries behind it. So if nothing has submitted with 4h left, every
-# scheduled attempt has already failed and this is the last line.
-ALERT_LEAD_HOURS = 4.0
+# emergency rather than a normal state of affairs.
+#
+# Was 4.0 with a 3-hourly cron, and that combination never fired inside the
+# rescue window: measured over a week it landed there on 1 day in 7, and on
+# GW6 it arrived at 6.7h (correctly silent) and then 1.6h AFTER the deadline.
+# A backstop that is scheduled more sparsely than the gap it is covering is
+# not a backstop.
+#
+# 6.0 with an hourly cron closes it. Bootstrapping both arrival streams over
+# all 38 deadlines, P(gameweek submitted) goes from 94.8% to 100.0%:
+#
+#     band [2.0,6.0) + watchdog 3-hourly @4h      94.8%   <- lost GW6
+#     band [0.5,8.0) + watchdog 3-hourly @4h      99.9%
+#     band [0.5,8.0) + watchdog hourly    @6h    100.0%
+#
+# Triggering at 6h while the run's own band reaches 8h can mean the watchdog
+# acts first. That is deliberate and safe: its dispatch sets the marker, and
+# the marker now stops the scheduled tick regardless of --respect-window.
+ALERT_LEAD_HOURS = 6.0
 
 # The watchdog's own cadence. Used only to judge its own lateness.
-EXPECTED_INTERVAL_HOURS = 3.0
-LATE_FACTOR = 2.5
+EXPECTED_INTERVAL_HOURS = 1.0
+LATE_FACTOR = 6.0
 
 # Send an unprompted all-clear at most this often, so a silent watchdog is
 # distinguishable from a quiet week.
