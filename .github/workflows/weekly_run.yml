@@ -32,6 +32,14 @@ on:
         options:
           - 'false'
           - 'true'
+      force:
+        description: 'Resubmit even if this gameweek is already marked submitted'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
 
 jobs:
   # Costs a few seconds and touches no credentials. Everything below it - the
@@ -130,10 +138,17 @@ jobs:
           if [ "${{ github.event_name }}" = "schedule" ]; then
             WINDOW="--respect-window"
           fi
+          # The marker is enforced on every path now, so a dispatch no longer
+          # resubmits a gameweek by accident - including the watchdog's own
+          # remediation dispatch. --force is the deliberate override.
+          FORCE=""
+          if [ "${{ github.event.inputs.force }}" = "true" ]; then
+            FORCE="--force"
+          fi
           if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
-            python manager.py --dry-run $WINDOW
+            python manager.py --dry-run $WINDOW $FORCE
           else
-            python manager.py $WINDOW
+            python manager.py $WINDOW $FORCE
           fi
 
       - name: Report a failed run

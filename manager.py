@@ -264,7 +264,8 @@ def _record_submission(event_id: int) -> None:
     )
 
 
-def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2) -> dict | None:
+def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2,
+                     force: bool = False) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
@@ -287,17 +288,24 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
         return None
     event_id = int(next_event["id"])
 
-    if respect_window:
-        # The marker makes the hourly schedule idempotent. Four ticks qualify
-        # per gameweek so that a dropped or delayed run has three retries
-        # behind it; without this check those retries would each submit again.
-        # A second run is not harmless: it re-optimises with the free transfers
-        # already spent, so it can only improve the squad by taking a hit.
+    # The marker is checked on EVERY path, not only under --respect-window.
+    #
+    # It used to sit inside the window branch, so a manual dispatch ignored it
+    # - including the watchdog's own remediation dispatch. That left a real
+    # race: the watchdog triggers at 6h, a scheduled tick is already acting,
+    # and both submit, the second with its free transfers spent and a -4
+    # available to spend them. Idempotency and "is today the day" are separate
+    # questions and are now answered separately.
+    #
+    # --force is the deliberate override, for resubmitting a gameweek on
+    # purpose.
+    if not force:
         already = _marker_gameweek()
         if already is not None and already == event_id:
             logger.info("GW%d has already been submitted; nothing to do", event_id)
             return {"status": "already-submitted", "event_id": event_id}
 
+    if respect_window:
         lead = hours_to_deadline(next_event)
         if lead is None:
             logger.warning("GW%d has no deadline_time; proceeding rather than skipping", event_id)
@@ -566,11 +574,15 @@ def main() -> int:
     # Opt-in, so every existing caller and test keeps working unchanged and
     # only the scheduled run enforces it.
     ap.add_argument("--respect-window", action="store_true",
-                    help="skip unless the deadline is inside the daily cron's window")
+                    help="skip unless the deadline is inside the acting window")
+    # The marker otherwise makes a second run for the same gameweek a no-op,
+    # which is what keeps the schedule and the watchdog from colliding.
+    ap.add_argument("--force", action="store_true",
+                    help="resubmit even if this gameweek is already marked submitted")
     args = ap.parse_args()
 
     result = run_weekly_cycle(dry_run=args.dry_run, max_hits=args.max_hits,
-                              respect_window=args.respect_window)
+                              respect_window=args.respect_window, force=args.force)
     if result is None:
         return 1
     print(json.dumps(result, indent=2, default=str))

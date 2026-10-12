@@ -20,10 +20,14 @@ name: FPL Auto Manager - Deadline Watchdog
 
 on:
   schedule:
-    # Every 3 hours. The weekly run acts at a lead of 5.0-5.5h with three
-    # retries behind it, so this samples often enough to catch a gameweek
-    # where all four of those attempts failed, while there is still time.
-    - cron: '0 */3 * * *'
+    # Hourly, not 3-hourly. GitHub throttles this repo's crons to ~5.5
+    # arrivals a day whatever is requested, so a 3-hourly request became ~5h
+    # real gaps - sparser than the window it was meant to cover. Measured over
+    # a week it landed in the rescue window on 1 day in 7, and on GW6 it
+    # arrived 6.7h out and then 1.6h after the deadline. Asking hourly gets
+    # the same throttled rate as the weekly run, which is what the coverage
+    # model in watchdog.py assumes.
+    - cron: '0 * * * *'
   workflow_dispatch:
     inputs:
       dry_run:
