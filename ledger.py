@@ -61,14 +61,20 @@ def build_record(*, event_id: int, plan, scored, captain: int, vice: int,
             "is_vice_captain": pid == int(vice),
         }
         if row is not None:
-            for col, key in (("web_name", "name"), ("team_name", "team"),
-                             ("position", "position"), ("cost", "cost"),
+            # position is FPL's element_type and stays an int; everything else
+            # numeric is a float. Without the split it serialised as 2.0, which
+            # every reader then has to coerce back.
+            if "position" in by_id.columns:
+                rec["position"] = int(row["position"])
+            for col, key in (("web_name", "name"), ("team_name", "team")):
+                if col in by_id.columns:
+                    rec[key] = str(row[col])
+            for col, key in (("cost", "cost"),
                              ("xp_next", "xp_next"), ("xp_horizon", "xp_horizon"),
                              ("p_start", "p_start"), ("availability", "availability"),
                              ("exp_minutes", "exp_minutes"), ("sd_next", "sd_next")):
                 if col in by_id.columns:
-                    v = row[col]
-                    rec[key] = float(v) if hasattr(v, "__float__") and not isinstance(v, str) else str(v)
+                    rec[key] = float(row[col])
         players.append(rec)
 
     return {
