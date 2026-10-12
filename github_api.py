@@ -81,6 +81,56 @@ class GitHubRepo:
         logger.warning("could not write variable %s: status %s", name, status)
         return False
 
+    def get_file(self, path: str, branch: str) -> tuple[str | None, str | None]:
+        """(content_b64, sha) for a file, or (None, None) if it does not exist."""
+        status, body = self._api(f"/contents/{path}?ref={branch}")
+        if status == 200:
+            return body.get("content"), body.get("sha")
+        return None, None
+
+    def put_file(self, path: str, content: bytes, branch: str, message: str) -> bool:
+        """
+        Create or update a file on `branch` via the Contents API.
+
+        Used for the prediction ledger. Deliberately not main: the ledger is
+        data the bot writes on a schedule, and mixing it into the code history
+        makes every diff noisy and every revert dangerous.
+        """
+        import base64
+
+        _, sha = self.get_file(path, branch)
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": branch,
+        }
+        if sha:
+            payload["sha"] = sha
+        status, body = self._api(f"/contents/{path}", "PUT", payload)
+        if status in (200, 201):
+            return True
+        logger.warning("could not write %s on %s: status %s %s",
+                       path, branch, status, body.get("message", ""))
+        return False
+
+    def ensure_branch(self, branch: str, from_branch: str = "main") -> bool:
+        """Create `branch` at the tip of `from_branch` if it is missing."""
+        status, _ = self._api(f"/git/ref/heads/{branch}")
+        if status == 200:
+            return True
+        status, body = self._api(f"/git/ref/heads/{from_branch}")
+        if status != 200:
+            logger.warning("cannot read %s to branch from: %s", from_branch, status)
+            return False
+        sha = body.get("object", {}).get("sha")
+        status, body = self._api("/git/refs", "POST",
+                                 {"ref": f"refs/heads/{branch}", "sha": sha})
+        if status in (200, 201):
+            logger.info("created branch %s", branch)
+            return True
+        logger.warning("could not create branch %s: %s %s", branch, status, body.get("message",""))
+        return False
+
     def dispatch_workflow(self, workflow: str, ref: str = "main", inputs: dict | None = None) -> bool:
         status, body = self._api(f"/actions/workflows/{workflow}/dispatches", "POST",
                                  {"ref": ref, "inputs": inputs or {}})

@@ -29,6 +29,7 @@ import pandas as pd
 import chips
 import deadline_state
 import github_api
+import ledger
 import notify
 import optimizer as optimizer_mod
 import priors
@@ -523,6 +524,25 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
             # remove. Leaving it unset makes the next hourly tick retry, and
             # the watchdog alert if those run out.
             _record_submission(event_id)
+            # And a durable record of what was predicted, so "why did it bench
+            # him" is answerable later from data rather than from run logs that
+            # expire in 30 days. Deliberately after the marker: the ledger is
+            # observability, and must never be able to cost a submission.
+            # Belt and braces. record_submission catches its own failures,
+            # but this is the submit path: observability code must not be able
+            # to turn a submitted gameweek into a failed run, even if the
+            # ledger itself grows a bug.
+            try:
+                ledger.record_submission(
+                    _github(), event_id=event_id, plan=plan, scored=scored,
+                    captain=plan.captain, vice=plan.vice_captain,
+                    chip=decision.chip,
+                    transfers_in=plan.transfers_in, transfers_out=plan.transfers_out,
+                    hits=plan.hits,
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("prediction ledger failed (%s: %s); the team is submitted",
+                               type(e).__name__, e)
         else:
             lineup_ok = False
             logger.error("lineup submission failed")
