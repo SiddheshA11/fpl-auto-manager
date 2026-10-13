@@ -152,16 +152,24 @@ def test_the_step_that_runs_manager_can_raise_the_alarm():
     available. The step had no Telegram vars, so that degraded to a
     NullNotifier and the run exited 0. Its unit test monkeypatched from_env,
     patching away the exact thing that was broken.
+
+    Parsed as text, not with pyyaml: pyyaml is not in requirements.txt, so
+    importing it here passed locally and died in CI with ModuleNotFoundError -
+    which is why test_workflow_invariants.py already avoids it.
     """
-    import yaml  # noqa: PLC0415 - only needed here
-    doc = yaml.safe_load((WORKFLOWS / "weekly_run.yml").read_text())
-    steps = [s for s in doc["jobs"]["manage-team"]["steps"]
-             if "manager.py" in str(s.get("run", ""))]
-    assert steps, "no step runs manager.py"
-    for step in steps:
-        env = step.get("env") or {}
-        assert "TELEGRAM_BOT_TOKEN" in env and "TELEGRAM_CHAT_ID" in env, (
-            f"step {step.get('name')!r} runs manager.py but cannot send its own alert"
+    text = (WORKFLOWS / "weekly_run.yml").read_text()
+
+    marker = "- name: Run FPL Auto Manager"
+    assert marker in text, "the step that runs manager.py was renamed"
+    block = text[text.index(marker):]
+    nxt = block.find("\n      - name:", 1)
+    block = block[:nxt] if nxt > 0 else block
+
+    assert "manager.py" in block, "wrong block located"
+    for var in ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"):
+        assert var in block, (
+            f"the step running manager.py has no {var}, so manager.py cannot "
+            "send its own alert and degrades to a NullNotifier"
         )
 
 
