@@ -41,6 +41,29 @@ on:
           - 'false'
           - 'true'
 
+# Only one weekly run at a time, ever.
+#
+# The submission marker is an unsynchronised read-then-act, so it closes the
+# SEQUENTIAL case (a dispatch after a completed submission) and does nothing
+# for the concurrent one. The concurrent case is reachable in normal operation:
+# the watchdog dispatches whenever the marker is unset and the lead is under
+# 6h, the marker stays unset for the whole duration of an acting run, and the
+# acting band is 7.5h wide.
+#
+# The severe half is the refresh token. PingOne invalidates the old token the
+# moment it issues a new one, and each run writes the replacement back to the
+# FPL_REFRESH_TOKEN secret. Two concurrent runs both spend the same token and
+# then race to store their replacement; if the loser's write lands last the
+# stored token is already invalid and every later run is locked out until a
+# human issues a new one by hand.
+#
+# cancel-in-progress is false on purpose: cancelling a run that may be
+# mid-submission is worse than making the second one wait. A queued run that
+# starts late finds the marker set and skips.
+concurrency:
+  group: fpl-weekly-run
+  cancel-in-progress: false
+
 jobs:
   # Costs a few seconds and touches no credentials. Everything below it - the
   # dependency install, the priors fetch, and above all the FPL login - is
@@ -128,6 +151,14 @@ jobs:
           FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
           GH_PAT: ${{ secrets.GH_PAT }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          # manager.py raises the alarm itself when it submits a team and then
+          # cannot write the submission marker - the case where the next tick
+          # resubmits with its free transfers already spent and a -4 available
+          # to spend them. Without these it degraded to a NullNotifier and the
+          # run exited 0, so the alarm for the most destructive failure mode
+          # was wired to nothing.
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           # --respect-window on the schedule only. It re-checks the window and
           # the marker inside manager.py rather than trusting the gate: the
