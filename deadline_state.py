@@ -101,11 +101,25 @@ def next_event(events: list[dict], now: datetime | None = None) -> dict | None:
     return min(upcoming, key=lambda pair: pair[0])[1]
 
 
+def previous_event(events: list[dict], now: datetime | None = None) -> dict | None:
+    """
+    The most recent gameweek whose deadline has already passed.
+
+    The watchdog needs the event, not just the time: a deadline that passed
+    with nothing submitted is invisible to `next_event`, which only ever looks
+    forward. That blind spot is how GW6 of 2026-27 passed unsubmitted and the
+    watchdog reported `waiting` on GW7 ninety minutes later.
+    """
+    now = now or datetime.now(timezone.utc)
+    past = [(parse_deadline(e), e) for e in events]
+    past = [(d, e) for d, e in past if d is not None and d <= now]
+    return max(past, key=lambda pair: pair[0])[1] if past else None
+
+
 def previous_deadline(events: list[dict], now: datetime | None = None) -> datetime | None:
     """The most recent deadline already passed, or None before the season starts."""
-    now = now or datetime.now(timezone.utc)
-    past = [d for d in (parse_deadline(e) for e in events) if d is not None and d <= now]
-    return max(past) if past else None
+    event = previous_event(events, now)
+    return parse_deadline(event) if event else None
 
 
 def in_acting_window(lead_hours: float | None) -> bool:

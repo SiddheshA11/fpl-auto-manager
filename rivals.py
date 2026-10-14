@@ -39,6 +39,26 @@ UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
 TIMEOUT = 30
 RETRIES = 3
 
+# The per-rival fan-out runs on the weekly run's critical path, inside STEP 3,
+# before anything is submitted. Production shape: 1 /entry/ + 5 /standings/ +
+# 94 /picks/ = 100 sequential requests. At RETRIES=3 with exponential backoff
+# the worst case per URL is ~97s, so roughly nine slow URLs out of a hundred
+# exhaust the job's entire 15-minute budget and the gameweek is lost without a
+# submission ever being attempted. A measured healthy fetch is ~0.245s.
+#
+# So: one retry on the fan-out, a small delay because config.STRATEGY already
+# records that "FPL tolerates a steady trickle; bursts get rate limited", and
+# a hard wall-clock budget after which we stop and use what we have.
+PICKS_RETRIES = 1
+REQUEST_DELAY = 0.1
+FAN_OUT_BUDGET_S = 60.0
+
+# Below this many rivals the field is not a field. With n=1 every owned player
+# reads as 100% owned and everything else 0%, which at FIELD_OWNERSHIP_WEIGHT
+# swings effective xP by +-15% on one arbitrary stranger's squad. The template
+# is a worse target but an honest distribution, so it wins on thin data.
+MIN_RIVALS = 20
+
 # Leagues everybody is in by construction - "Overall", "Gameweek 1", a country,
 # a favourite club. They carry millions of entries, so they are the template
 # under another name and tell you nothing about your rivals. The real mini
@@ -65,13 +85,16 @@ class FieldOwnership:
 class PublicFPL:
     """Read-only FPL access. No credentials, so no token can be spent."""
 
-    def __init__(self, opener=None):
+    def __init__(self, opener=None, retries: int = RETRIES, delay: float = 0.0):
+        self._retries = retries
+        self._delay = delay
         self._opener = opener or self._fetch
 
-    @staticmethod
-    def _fetch(url: str):
+    def _fetch(self, url: str):
         last = None
-        for attempt in range(RETRIES):
+        if self._delay:
+            time.sleep(self._delay)
+        for attempt in range(self._retries):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": UA})
                 with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
@@ -82,7 +105,8 @@ class PublicFPL:
                 # failure, and must not take the weekly run down with it.
                 if isinstance(e, urllib.error.HTTPError) and e.code == 404:
                     return None
-                time.sleep(2**attempt)
+                if attempt + 1 < self._retries:
+                    time.sleep(2**attempt)
         logger.warning("giving up on %s (%s)", url, last)
         return None
 
@@ -115,7 +139,9 @@ def rival_ids(client: PublicFPL, league_id: int, entry_id: int,
 
 
 def field_ownership(client: PublicFPL, entry_id: int, event: int,
-                    league_ids: list[int] | None = None) -> FieldOwnership:
+                    league_ids: list[int] | None = None,
+                    budget_s: float = FAN_OUT_BUDGET_S,
+                    clock=time.monotonic) -> FieldOwnership:
     """
     Squad and captain shares across every rival in your mini leagues.
 
@@ -123,7 +149,12 @@ def field_ownership(client: PublicFPL, entry_id: int, event: int,
     finished - `/entry/{id}/event/{gw}/picks/` publishes nothing before then,
     and a caller must be able to fall back to the template instead of crashing
     the weekly run.
+
+    `budget_s` bounds the whole fan-out. Running out of budget returns the
+    rivals gathered so far rather than nothing, and the caller's MIN_RIVALS
+    floor decides whether that partial field is worth using.
     """
+    started = clock()
     if league_ids is None:
         league_ids = mini_league_ids(client, entry_id)
 
@@ -134,7 +165,13 @@ def field_ownership(client: PublicFPL, entry_id: int, event: int,
     squad: Counter[int] = Counter()
     captain: Counter[int] = Counter()
     n = 0
+    asked = 0
     for rid in sorted(seen):
+        if clock() - started > budget_s:
+            logger.warning("fan-out budget of %.0fs spent after %d/%d rivals; "
+                           "using what was gathered", budget_s, asked, len(seen))
+            break
+        asked += 1
         picks = client.get(f"/entry/{rid}/event/{event}/picks/")
         if not picks or not picks.get("picks"):
             continue
@@ -149,7 +186,8 @@ def field_ownership(client: PublicFPL, entry_id: int, event: int,
         logger.info("no rival picks available for GW%s; caller should fall back", event)
         return FieldOwnership(event=event, managers=0)
 
-    logger.info("field ownership from %d rivals across %d leagues", n, len(league_ids))
+    logger.info("field ownership from %d rivals across %d leagues (%.1fs)",
+                n, len(league_ids), clock() - started)
     return FieldOwnership(
         event=event,
         managers=n,
@@ -158,9 +196,6 @@ def field_ownership(client: PublicFPL, entry_id: int, event: int,
     )
 
 
-# Column names the optimiser reads. Kept here so the producer and the consumer
-# cannot drift apart silently, which is how `selected_by_percent` ended up
-# hardcoded in three places.
 FIELD_OWNERSHIP_COL = "field_ownership"
 FIELD_CAPTAINCY_COL = "field_captaincy"
 
@@ -194,7 +229,7 @@ def field_ownership_or_none(entry_id: int, event: int, client: "PublicFPL | None
     it used before this existed.
     """
     try:
-        client = client or PublicFPL()
+        client = client or PublicFPL(retries=PICKS_RETRIES, delay=REQUEST_DELAY)
         fo = field_ownership(client, entry_id, event)
     except Exception as e:  # noqa: BLE001 - a tilt input may not break the run
         logger.warning("field ownership unavailable (%s: %s); falling back to the template",
@@ -202,6 +237,11 @@ def field_ownership_or_none(entry_id: int, event: int, client: "PublicFPL | None
         return None
     if not fo.managers:
         logger.info("no rival picks for GW%s; falling back to the template", event)
+        return None
+    if fo.managers < MIN_RIVALS:
+        logger.warning("only %d rival(s) readable for GW%s, below the floor of %d; "
+                       "falling back to the template rather than tilting at a "
+                       "distribution this thin", fo.managers, event, MIN_RIVALS)
         return None
     return fo
 

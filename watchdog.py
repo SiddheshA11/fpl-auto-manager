@@ -80,6 +80,20 @@ LATE_FACTOR = 6.0
 # distinguishable from a quiet week.
 HEARTBEAT_EVERY_HOURS = 72.0
 
+# How long after a deadline a missed gameweek is still worth shouting about.
+#
+# A miss is permanent - nothing can be submitted for a gameweek whose deadline
+# has gone - so this is not a remediation window, it is an alerting one. Wide
+# enough that a miss cannot pass unseen between two checks, bounded so a single
+# miss does not alert for the rest of the season.
+#
+# Outside the window the watchdog stays SILENT about it but still refuses to
+# send an all-clear while the marker lags, because the one thing it must never
+# do is report health over a gameweek it dropped. That is exactly what happened
+# on 2026-10-10: ninety minutes after the GW6 deadline passed unsubmitted, the
+# watchdog logged "waiting - GW7 deadline is 166.4h away".
+MISS_ALERT_WINDOW_HOURS = 36.0
+
 
 def _parse_int(value: str | None) -> int | None:
     try:
@@ -97,45 +111,119 @@ def _parse_ts(value: str | None) -> datetime | None:
         return None
 
 
+def _missed_gameweek(events: list[dict], last_submitted_gw: int | None,
+                    now: datetime) -> dict | None:
+    """
+    The most recently passed gameweek, if nothing was ever submitted for it.
+
+    Compares against the marker rather than against any record of runs: a
+    gameweek is missed when no team went in for it, whatever the scheduler did.
+    """
+    prev = ds.previous_event(events, now)
+    if prev is None:
+        return None
+    prev_id = int(prev["id"])
+    if last_submitted_gw is not None and last_submitted_gw >= prev_id:
+        return None
+    deadline = ds.parse_deadline(prev)
+    hours_since = (now - deadline).total_seconds() / 3600.0 if deadline else None
+    return {"event_id": prev_id, "hours_since": hours_since}
+
+
+def _with_miss(verdict: dict, missed: dict | None) -> dict:
+    """
+    Fold a passed-and-unsubmitted gameweek into a forward-looking verdict.
+
+    Deliberately an annotation and not a branch. A miss is permanent and
+    cannot be remediated, while the gameweek ahead still can be - so an
+    `overdue` verdict, which triggers a run, must keep precedence. An earlier
+    version of this returned early on a miss and would have suppressed
+    remediation of the NEXT deadline for the rest of the season; two existing
+    tests caught it.
+    """
+    if not missed:
+        verdict["missed_event"] = None
+        return verdict
+
+    gw = missed["event_id"]
+    since = missed["hours_since"]
+    verdict["missed_event"] = gw
+    note = (f"GW{gw} deadline passed with nothing submitted"
+            + (f" ({since:.1f}h ago)" if since is not None else ""))
+
+    if verdict["alert"]:
+        # Something ahead already needs attention; carry the miss with it.
+        verdict["detail"] = f"{verdict['detail']}; also: {note}"
+        return verdict
+
+    fresh = since is not None and since <= MISS_ALERT_WINDOW_HOURS
+    if fresh:
+        verdict["state"] = "missed"
+        verdict["alert"] = True
+        verdict["detail"] = note
+    else:
+        # Too old to shout about, but `missed_event` keeps the all-clear
+        # suppressed - silence is bad, a false clean bill of health is worse.
+        verdict["detail"] = f"{verdict['detail']}; {note}"
+    return verdict
+
+
 def assess(events: list[dict], last_submitted_gw: int | None,
            now: datetime | None = None) -> dict:
     """
     The judgement, as pure data. No network, no side effects, so the decision
     can be tested exhaustively without mocking a transport.
+
+    Looks backwards as well as forwards. `ds.next_event` only ever returns a
+    deadline in the future, so on its own the moment a deadline passes
+    unsubmitted the gameweek stops existing here and the verdict silently
+    becomes "waiting" on the next one - which is exactly what the watchdog
+    reported ninety minutes after GW6 of 2026-27 was dropped.
     """
     now = now or datetime.now(timezone.utc)
+    missed = _missed_gameweek(events, last_submitted_gw, now)
     event = ds.next_event(events, now)
 
     if event is None:
-        return {"state": "no-gameweek", "event_id": None, "lead_hours": None,
-                "alert": False, "trigger": False,
-                "detail": "no upcoming gameweek; season over or calendar unpublished"}
+        return _with_miss({
+            "state": "no-gameweek", "event_id": None, "lead_hours": None,
+            "alert": False, "trigger": False,
+            "detail": "no upcoming gameweek; season over or calendar unpublished",
+        }, missed)
 
     event_id = int(event["id"])
     lead = ds.hours_to_deadline(event, now)
     submitted = last_submitted_gw is not None and last_submitted_gw == event_id
 
     if submitted:
-        return {"state": "submitted", "event_id": event_id, "lead_hours": lead,
-                "alert": False, "trigger": False,
-                "detail": f"GW{event_id} already submitted"}
+        return _with_miss({
+            "state": "submitted", "event_id": event_id, "lead_hours": lead,
+            "alert": False, "trigger": False,
+            "detail": f"GW{event_id} already submitted",
+        }, missed)
 
     if lead is None:
-        return {"state": "unreadable", "event_id": event_id, "lead_hours": None,
-                "alert": True, "trigger": False,
-                "detail": f"GW{event_id} has no readable deadline_time; "
-                          "the payload shape may have changed"}
+        return _with_miss({
+            "state": "unreadable", "event_id": event_id, "lead_hours": None,
+            "alert": True, "trigger": False,
+            "detail": f"GW{event_id} has no readable deadline_time; "
+                      "the payload shape may have changed",
+        }, missed)
 
     if lead <= ALERT_LEAD_HOURS:
-        return {"state": "overdue", "event_id": event_id, "lead_hours": lead,
-                "alert": True, "trigger": True,
-                "detail": f"GW{event_id} deadline is {lead:.1f}h away and nothing "
-                          "has submitted a team for it"}
+        return _with_miss({
+            "state": "overdue", "event_id": event_id, "lead_hours": lead,
+            "alert": True, "trigger": True,
+            "detail": f"GW{event_id} deadline is {lead:.1f}h away and nothing "
+                      "has submitted a team for it",
+        }, missed)
 
-    return {"state": "waiting", "event_id": event_id, "lead_hours": lead,
-            "alert": False, "trigger": False,
-            "detail": f"GW{event_id} deadline is {lead:.1f}h away; "
-                      "not yet due to be submitted"}
+    return _with_miss({
+        "state": "waiting", "event_id": event_id, "lead_hours": lead,
+        "alert": False, "trigger": False,
+        "detail": f"GW{event_id} deadline is {lead:.1f}h away; "
+                  "not yet due to be submitted",
+    }, missed)
 
 
 def check_own_lateness(last_heartbeat: datetime | None, now: datetime) -> float | None:
@@ -214,7 +302,9 @@ def run(dry_run: bool = False, now: datetime | None = None,
     # the watchdog has stopped entirely, so it is sent even on a quiet week.
     due_heartbeat = (last_heartbeat is None or
                      (now - last_heartbeat).total_seconds() / 3600.0 >= HEARTBEAT_EVERY_HOURS)
-    if due_heartbeat and not verdict["alert"]:
+    # Never an all-clear over a gameweek that was dropped, even once the miss
+    # is too old to alert on. Silence is bad; a false clean bill is worse.
+    if due_heartbeat and not verdict["alert"] and not verdict.get("missed_event"):
         messages.append(f"*FPL deadline watchdog*\n\nAll clear. {verdict['detail']}.")
 
     if not dry_run:
