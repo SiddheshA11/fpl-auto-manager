@@ -678,6 +678,50 @@ risks missing a deadline if a run fails, wider lets two consecutive daily runs
 both qualify and reintroduces the double submission the scheduler was disabled
 for. `--ignore-window` overrides it for manual dispatch.
 
+## The GW1-5 decline diagnosis was wrong - read this before acting on it
+
+Written up on 2026-10-07 as "losing in all our leagues", with lineup selection
+leaking 7.4 points a gameweek and captaincy 4.6, measured against
+hindsight-optimal. Both numbers were arithmetically right and the conclusion
+was wrong, because no comparison group was ever collected. It was available
+from the same public endpoints the ownership tilt already reads.
+
+`measure_field_leaks.py` computes the identical metric for every rival in the
+same mini leagues over the same gameweeks, using `calibrate.assess` so the
+arithmetic is literally the same code. 92 rivals, GW1-5:
+
+```
+  metric         mine  field mean  median     sd    p90  my pctile
+  lineup leak      37        30.3    28.5   17.7     57        66th
+  captain leak     23        29.3    29.0    9.3     41        24th
+  combined         60        59.5    57.5   19.6     87        53th
+  points          329       317.0   319.5   28.8               59th
+```
+
+**Combined, this team leaks 60 against a field mean of 59.5 - the 53rd
+percentile, dead average. Captaincy is the 24th percentile, better than three
+quarters of the field: above-average captaincy was written up as a 4.6/GW
+defect.** Only the lineup leak is mildly above the field, at the 66th
+percentile, well inside p90.
+
+Two further corrections to that write-up:
+
+- **"+30 versus average" overstated the edge.** The global average is 299 but
+  the mini-league field averages 317, so the real edge over the actual rivals
+  is +12, not +30. The leagues are stronger than the global pool.
+- **The 34-49 point gap to the league leaders needs no skill deficit.**
+  Bootstrapping 20-manager leagues from the real rival-total distribution, the
+  expected gap from a 59th-percentile manager to the leader after five
+  gameweeks is ~37 points. The observed gap is the middle of that range. Five
+  gameweeks cannot separate skill from variance here: rival-total sd is ~29
+  over five gameweeks.
+
+The one unambiguous loss this season was infrastructure, not modelling: GW6
+passed unsubmitted because the acting window rejected a run with 1.94h in hand,
+3.6 minutes short of an unjustified 2.0h floor.
+
+**Do not re-derive a leak figure without the field distribution beside it.**
+
 ## Outstanding, verified but unfixed
 
 Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**

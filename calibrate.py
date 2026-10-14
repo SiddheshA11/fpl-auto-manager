@@ -14,11 +14,15 @@ Two different questions, kept apart on purpose:
     correlation regardless of model quality, so read the bias and MAE and
     treat r as near-meaningless on a single gameweek.
   - **decision loss**: how many points a better *lineup* or *armband* would
-    have won from the same fifteen. This is the actionable number. Measured
-    over GW1-5 by hand it came to 7.4 and 4.6 points a gameweek.
+    have won from the same fifteen.
 
-Hindsight-optimal is not a target - nobody achieves it - but the gap's trend
-and its composition are what tell you where to look.
+Hindsight-optimal is not a target and, on its own, not even evidence. Measured
+against all 92 rivals in the same mini leagues over GW1-5, this team's lineup
+leak sat at the 74th percentile and its captaincy leak at the **33rd** - i.e.
+better than two thirds of the field. A leak figure without the field's
+distribution beside it invited reading above-average captaincy as a defect,
+which is exactly what happened. Use `measure_field_leaks.py` for the
+comparison.
 
     python3 calibrate.py                 # every gameweek in the ledger
     python3 calibrate.py --gw 7
@@ -48,6 +52,10 @@ BOOTSTRAP = "https://fantasy.premierleague.com/api/bootstrap-static/"
 # FPL's legal XI shape, by element_type.
 XI_MIN = {1: 1, 2: 3, 3: 2, 4: 1}
 XI_MAX = {1: 1, 2: 5, 3: 5, 4: 3}
+
+# The armband multiplies the captain's score. Triple captain makes it 3.
+CHIP_CAPTAIN_MULTIPLIER = {"3xc": 3}
+DEFAULT_CAPTAIN_MULTIPLIER = 2
 
 
 def _fetch(url: str, timeout: int = 30):
@@ -104,18 +112,67 @@ def best_legal_xi(players: list[dict], points: dict[int, int]) -> tuple[int, lis
     return best
 
 
+def captain_multiplier(chip: str | None) -> int:
+    return CHIP_CAPTAIN_MULTIPLIER.get(chip or "", DEFAULT_CAPTAIN_MULTIPLIER)
+
+
+def apply_autosubs(started: list[dict], benched: list[dict],
+                   minutes: dict[int, int]) -> tuple[list[dict], list[dict]]:
+    """
+    Replace starters who played no minutes, the way FPL does.
+
+    Bench order matters: FPL walks the bench in order and makes each swap only
+    if the resulting eleven is still legal. A keeper can only replace a keeper.
+    Ignoring this overstated the lineup loss, because points "lost" on a
+    starter who never played were in fact recovered automatically.
+    """
+    xi = list(started)
+    bench = list(benched)
+    subs = []
+
+    def legal(players):
+        counts = {k: sum(1 for p in players if int(p.get("position", 0)) == k) for k in XI_MIN}
+        return all(XI_MIN[k] <= counts[k] <= XI_MAX[k] for k in XI_MIN)
+
+    for out in [p for p in started if minutes.get(int(p["id"]), 0) == 0]:
+        for cand in list(bench):
+            if minutes.get(int(cand["id"]), 0) == 0:
+                continue
+            trial = [cand if p is out else p for p in xi]
+            if legal(trial):
+                xi = trial
+                bench.remove(cand)
+                subs.append((out, cand))
+                break
+    return xi, subs
+
+
 def assess(record: dict, act: dict[int, dict]) -> dict:
     players = record.get("players", [])
     pts = {int(p["id"]): int(act.get(int(p["id"]), {}).get("total_points", 0)) for p in players}
     mins = {int(p["id"]): int(act.get(int(p["id"]), {}).get("minutes", 0)) for p in players}
 
-    started = [p for p in players if p.get("started")]
+    named_xi = [p for p in players if p.get("started")]
     benched = [p for p in players if not p.get("started")]
     cap = next((int(p["id"]) for p in players if p.get("is_captain")), None)
+    mult = captain_multiplier(record.get("chip"))
 
-    xi_actual = sum(pts[int(p["id"])] for p in started)
+    # The eleven that actually scored, after FPL's automatic substitutions.
+    fielded, subs = apply_autosubs(named_xi, benched, mins)
+
+    xi_points = sum(pts[int(p["id"])] for p in fielded)
     best_total, _ = best_legal_xi(players, pts)
-    best_cap = max(started, key=lambda p: pts[int(p["id"])], default=None)
+
+    # Separate quantities, deliberately. `gw_score` is what FPL credited and
+    # must reconcile with /entry/{id}/history/; the loss figures hold the
+    # armband constant so a lineup error and a captaincy error do not
+    # contaminate each other.
+    captain_bonus = pts.get(cap, 0) * (mult - 1) if cap else 0
+    gw_score = xi_points + captain_bonus
+
+    best_cap = max(fielded, key=lambda p: pts[int(p["id"])], default=None)
+    captain_loss = ((pts[int(best_cap["id"])] - pts.get(cap, 0)) * (mult - 1)
+                    if best_cap and cap else 0)
 
     predicted = [float(p["xp_next"]) for p in players if "xp_next" in p]
     observed = [pts[int(p["id"])] for p in players if "xp_next" in p]
@@ -123,22 +180,27 @@ def assess(record: dict, act: dict[int, dict]) -> dict:
     misranked = sorted(
         [(pts[int(b["id"])], b.get("name", b["id"]), float(b.get("xp_next", 0)),
           float(b.get("p_start", 0)))
-         for b in benched if pts[int(b["id"])] >= 5],
+         for b in benched if pts[int(b["id"])] >= 5
+         and not any(c is b for _o, c in subs)],
         reverse=True,
     )
     return {
         "event": int(record["event"]),
-        "xi_actual": xi_actual,
+        "xi_points": xi_points,
+        "gw_score": gw_score,
+        "captain_multiplier": mult,
         "best_xi": best_total,
-        "lineup_loss": (best_total - xi_actual) if best_total is not None else None,
+        "lineup_loss": (best_total - xi_points) if best_total is not None else None,
         "bench_points": sum(pts[int(p["id"])] for p in benched),
         "captain": cap,
         "captain_points": pts.get(cap, 0) if cap else 0,
-        "captain_loss": (pts[int(best_cap["id"])] - pts.get(cap, 0)) if best_cap and cap else 0,
+        "captain_loss": captain_loss,
+        "autosubs": [(o.get("name", o["id"]), c.get("name", c["id"])) for o, c in subs],
         "predicted": predicted,
         "observed": observed,
         "misranked": misranked,
-        "started_blanks": [p.get("name", p["id"]) for p in started if mins[int(p["id"])] == 0],
+        "started_blanks": [p.get("name", p["id"]) for p in named_xi
+                           if mins[int(p["id"])] == 0],
         "chip": record.get("chip"),
         "tilt_source": record.get("tilt_source"),
     }
@@ -150,12 +212,15 @@ def report(rows: list[dict]) -> None:
               "nothing before that gameweek was ever written down.")
         return
 
-    print(f"\n{'GW':>3}{'XI':>6}{'best XI':>9}{'lineup loss':>13}{'bench':>7}"
-          f"{'cap':>6}{'cap loss':>10}")
-    print("-" * 56)
+    print(f"\n{'GW':>3}{'score':>7}{'XI':>5}{'best XI':>9}{'lineup loss':>13}"
+          f"{'bench':>7}{'cap':>6}{'cap loss':>10}")
+    print("-" * 64)
     for r in rows:
-        print(f"{r['event']:>3}{r['xi_actual']:>6}{r['best_xi']:>9}{r['lineup_loss']:>13}"
-              f"{r['bench_points']:>7}{r['captain_points']:>6}{r['captain_loss']:>10}")
+        print(f"{r['event']:>3}{r['gw_score']:>7}{r['xi_points']:>5}{r['best_xi']:>9}"
+              f"{r['lineup_loss']:>13}{r['bench_points']:>7}{r['captain_points']:>6}"
+              f"{r['captain_loss']:>10}")
+    print("`score` is what FPL credited (XI + armband); the loss columns hold the\n"
+          "armband constant so a lineup error and a captaincy error stay separate.")
 
     n = len(rows)
     ll = [r["lineup_loss"] for r in rows]
