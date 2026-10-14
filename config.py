@@ -101,41 +101,41 @@ OWNERSHIP_WEIGHT = float(os.environ.get("FPL_OWNERSHIP_WEIGHT", "0.2"))
 # ─── Whose ownership the tilt aims at ───
 #
 # OWNERSHIP_WEIGHT above tilts toward `selected_by_percent`, the eleven-million
-# player template. The league that decides the season is a couple of dozen
-# specific managers, and those are measurably not the same distribution.
-# Measured on GW2 2026-27 across 45 rivals, the template understates the field
-# for every top-owned player and always in the same direction:
+# player template. The league that decides the season is ~94 specific managers,
+# and those are measurably not the same distribution: the template understates
+# the field for every top-owned player, by 13 to 33 percentage points, always
+# in the same direction.
 #
-#     Kinsky       field 55.6%   template 22.4%   +33.2pp
-#     Calafiori    field 68.9%   template 41.7%   +27.2pp
-#     Szoboszlai   field 66.7%   template 43.2%   +23.5pp
-#     Haaland      field 84.4%   template 68.5%   +15.9pp
+# Aiming at the field is still the better-targeted choice. What is NOT
+# established is that it needs a different weight, and the +0.154 this carried
+# was wrong three ways:
 #
-# The swap cannot carry the weight across unchanged, which is the trap. The
-# objective multiplies `weight * (1 - 2*ownership)`, so its force scales with
-# that term's spread - and the field is the wider distribution, because in a
-# 45-manager league most players are owned by nobody at all. Measured spread
-# ratio 1.299 (GW1) and 1.301 (GW2), so +0.20 on the field would tilt at an
-# effective +0.26: harder, not merely better aimed, and afterwards the two
-# would be impossible to tell apart.
+#   1. It came from matching sd(1 - 2*ownership) between the two
+#      distributions, measured at 1.299 on a **45-manager** field. The field is
+#      94 now; field-ownership spread shrinks as the field grows, and the same
+#      calculation gives 1.146-1.173 -> 0.171-0.175. A constant derived from
+#      league size, hardcoded, drifts the moment anyone joins a league.
+#   2. sd(1 - 2*ownership) is the wrong quantity anyway. The objective applies
+#      `xp_i * (1 - w*(1 - 2*own_i))`, so the perturbation is
+#      `w*(1 - 2*own_i)*xp_i`. Matching the spread of THAT gives a ratio of
+#      1.037-1.055 - i.e. do not rescale at all.
+#   3. The claim that +0.154 "dominates" the template - same field exposure for
+#      about a point more expected - came from one snapshot of one squad build.
+#      Re-tested across four gameweeks it reverses on all four, and on GW5 the
+#      field tilt is dominated on both axes. The shipped value also sat on a
+#      MILP discontinuity, flipping squads between 0.154 and 0.170.
 #
-# +0.154 is the strength-matched weight, and at it the swap dominates the
-# template on both axes rather than trading between them:
+# So the weight is the template's, and the only deliberate change is the
+# target. Whether the field is actually a better target is UNRESOLVED and needs
+# several gameweeks with the squad rebuilt each time, not one snapshot.
+# Reproduce the above with `python3 measure_rival_tilt.py`.
 #
-#     configuration                   XI xP   mean field EO
-#     template  @ +0.20  production    48.93        33.7%
-#     field     @ +0.154 matched       49.87        34.1%
-#     no tilt   @  0.00  control       50.94        23.2%
-#
-# Same protection against the field, about a point more expected per gameweek,
-# because the tilt is finally aimed at the distribution it was always meant to
-# be aimed at. Reproduce with `python3 measure_rival_tilt.py`.
-#
-# Reads public endpoints only and spends no refresh token. Falls back to the
-# template if the rival picks cannot be read, so the weekly run cannot fail on
-# it.
+# Reads public endpoints and spends no refresh token. Falls back to the
+# template when the rival picks cannot be read, or when fewer than
+# rivals.MIN_RIVALS of them are readable.
 USE_FIELD_OWNERSHIP = os.environ.get("FPL_USE_FIELD_OWNERSHIP", "1") not in ("0", "false", "False")
-FIELD_OWNERSHIP_WEIGHT = float(os.environ.get("FPL_FIELD_OWNERSHIP_WEIGHT", "0.154"))
+FIELD_OWNERSHIP_WEIGHT = float(os.environ.get("FPL_FIELD_OWNERSHIP_WEIGHT",
+                                              str(OWNERSHIP_WEIGHT)))
 
 # The armband, tilted on captaincy ownership - a third distribution again, and
 # far more concentrated than squad ownership. Across 45 rivals in GW2 only six

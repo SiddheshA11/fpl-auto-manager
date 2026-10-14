@@ -204,17 +204,31 @@ def test_field_ownership_is_used_when_it_is_available(monkeypatch):
     assert tilt.scored[rivals.FIELD_CAPTAINCY_COL].tolist() == pytest.approx([53.3, 0.0])
 
 
-def test_the_field_weight_is_not_the_template_weight(monkeypatch):
+def test_the_field_weight_tracks_the_template_weight():
     """
-    The trap this whole exercise exists to avoid. The field is the wider
-    distribution - measured spread ratio 1.299 (GW1) and 1.301 (GW2) - so
-    carrying +0.20 across would tilt at an effective +0.26, harder rather than
-    merely better aimed.
+    This used to assert the field weight was STRICTLY SOFTER than the template
+    weight, pinned near 0.154. That encoded a claim that did not survive
+    scrutiny: the 0.154 came from matching sd(1 - 2*ownership) on a 45-manager
+    field, the field is 94 now and the same calculation gives ~0.17, and the
+    quantity the objective actually perturbs is `w*(1 - 2*own)*xp`, whose
+    spread ratio is 1.04-1.06 - meaning do not rescale at all.
+
+    So the deliberate change is the TARGET, not the strength, and the weight
+    follows the template's. A test asserting otherwise would re-pin a derived
+    constant to a league size.
     """
     import config
 
-    assert config.FIELD_OWNERSHIP_WEIGHT < config.OWNERSHIP_WEIGHT, (
-        "the field weight must be softer than the template weight to tilt with "
-        "the same force; see measure_rival_tilt.py"
+    assert config.FIELD_OWNERSHIP_WEIGHT == pytest.approx(config.OWNERSHIP_WEIGHT), (
+        "the field tilt should run at the template's measured weight unless and "
+        "until a multi-gameweek measurement justifies a different one"
     )
-    assert config.FIELD_OWNERSHIP_WEIGHT == pytest.approx(0.154, abs=0.02)
+
+
+def test_the_field_weight_is_still_overridable():
+    """The env override is how a future measurement gets applied without a deploy."""
+    import importlib
+
+    import config as c
+    importlib.reload(c)
+    assert isinstance(c.FIELD_OWNERSHIP_WEIGHT, float)
