@@ -178,3 +178,73 @@ def test_an_exploding_repo_client_does_not_escape(plan_and_scored):
     assert ledger.record_submission(Boom(), event_id=4, plan=plan, scored=scored,
                                     captain=3, vice=1, chip=None,
                                     transfers_in=[], transfers_out=[], hits=0) is False
+
+
+# ------------------------------------------------- the self-test
+#
+# The ledger's first production write would otherwise land ninety seconds
+# before a deadline, on a path no test covers against the live API, with a
+# silent failure mode that looks exactly like the normal empty state.
+
+
+def test_the_selftest_passes_when_the_api_cooperates(capsys):
+    class _Ok:
+        def __init__(self): self.writes = []
+        def ensure_branch(self, b, from_branch="main"): return True
+        def put_file(self, path, content, branch, message):
+            self.writes.append(path); return True
+        def get_file(self, path, branch): return ("e30=", "abc123")
+
+    gh = _Ok()
+    assert ledger.selftest(gh) == 0
+    out = capsys.readouterr().out
+    assert "PASS" in out
+    assert len(gh.writes) == 2, "must exercise create AND overwrite"
+
+
+def test_the_selftest_fails_loudly_when_the_branch_cannot_be_created(capsys):
+    """
+    The real failure: a GH_PAT with Actions and Secrets but not Contents write
+    403s here, and in production that is one log warning and a green run.
+    """
+    class _NoBranch:
+        def ensure_branch(self, b, from_branch="main"): return False
+        def put_file(self, *a, **k): raise AssertionError("should not be reached")
+        def get_file(self, *a, **k): return (None, None)
+
+    assert ledger.selftest(_NoBranch()) == 1
+    out = capsys.readouterr().out
+    assert "FAIL" in out and "Contents: write" in out
+
+
+def test_the_selftest_catches_a_broken_overwrite(capsys):
+    """
+    The sha-on-update path is the one the unit-test fake can never exercise,
+    because it always reports no existing sha. Without it every gameweek after
+    the first would 409 forever.
+    """
+    class _FirstWriteOnly:
+        def __init__(self): self.n = 0
+        def ensure_branch(self, b, from_branch="main"): return True
+        def get_file(self, *a, **k): return ("e30=", "abc123")
+        def put_file(self, *a, **k):
+            self.n += 1
+            return self.n == 1
+
+    assert ledger.selftest(_FirstWriteOnly()) == 1
+    assert "OVERWRITE" in capsys.readouterr().out
+
+
+def test_the_probe_cannot_collide_with_a_real_gameweek(capsys):
+    """Event 0 is not a gameweek; a probe must never overwrite real data."""
+    written = {}
+
+    class _Rec:
+        def ensure_branch(self, b, from_branch="main"): return True
+        def get_file(self, *a, **k): return ("e30=", "s")
+        def put_file(self, path, content, branch, message):
+            written[path] = content; return True
+
+    ledger.selftest(_Rec())
+    assert list(written) == ["predictions/gw00.json"]
+    assert all("gw0" in p for p in written)

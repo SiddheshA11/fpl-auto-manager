@@ -36,6 +36,12 @@ on:
         default: 'false'
         type: choice
         options: ['false', 'true']
+      selftest_ledger:
+        description: 'Instead of watching: prove the prediction ledger can write'
+        required: false
+        default: 'false'
+        type: choice
+        options: ['false', 'true']
 
 # Needed to dispatch the weekly run when nothing else has.
 permissions:
@@ -74,7 +80,12 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+          # The ledger self-test lives here because this job already carries
+          # GH_PAT and installs nothing. Dispatch-only; the schedule never
+          # takes this branch.
+          if [ "${{ github.event.inputs.selftest_ledger }}" = "true" ]; then
+            python3 ledger.py --selftest
+          elif [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
             python3 watchdog.py --dry-run
           else
             python3 watchdog.py
