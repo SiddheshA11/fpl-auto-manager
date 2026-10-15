@@ -134,3 +134,71 @@ def write(gh, record: dict) -> bool:
     except Exception as e:  # noqa: BLE001 - a ledger may not fail a submitted run
         logger.warning("could not write the prediction ledger (%s: %s)", type(e).__name__, e)
         return False
+
+
+def selftest(gh=None) -> int:
+    """
+    Exercise the real write path against the real API, before a deadline needs it.
+
+    The ledger's first production write would otherwise happen ninety seconds
+    before a deadline, on a code path no test covers against the live API - and
+    its failure mode is silent and indistinguishable from success. A GH_PAT
+    provisioned with Actions and Secrets but not `Contents: write` returns 403
+    on branch creation, `write()` logs one warning, the run exits 0 green, and
+    `calibrate.py` reports "the ledger is empty" - which reads as "nothing has
+    submitted yet" rather than "every write has 403ed for a season".
+
+    Writes a probe record under a reserved event id so it cannot collide with a
+    real gameweek, then reads it back.
+    """
+    import os
+
+    import github_api
+
+    if gh is None:
+        repo = os.environ.get("GITHUB_REPOSITORY", "")
+        token = os.environ.get("GH_PAT") or os.environ.get("GITHUB_TOKEN", "")
+        if not repo or not token:
+            print("FAIL: GITHUB_REPOSITORY or GH_PAT is not set")
+            return 1
+        gh = github_api.GitHubRepo(repo, token)
+
+    probe = {"schema": SCHEMA_VERSION, "event": 0, "players": [],
+             "recorded_at": datetime.now(timezone.utc).isoformat(),
+             "note": "selftest probe, not a gameweek"}
+
+    if not gh.ensure_branch(LEDGER_BRANCH):
+        print(f"FAIL: could not create or find the '{LEDGER_BRANCH}' branch. "
+              "GH_PAT most likely lacks Contents: write.")
+        return 1
+    print(f"ok: branch '{LEDGER_BRANCH}' exists")
+
+    if not write(gh, probe):
+        print("FAIL: could not write the probe record. GH_PAT most likely lacks "
+              "Contents: write.")
+        return 1
+    print(f"ok: wrote {LEDGER_DIR}/gw00.json")
+
+    content, _sha = gh.get_file(f"{LEDGER_DIR}/gw00.json", LEDGER_BRANCH)
+    if not content:
+        print("FAIL: wrote the probe but could not read it back")
+        return 1
+    print("ok: read it back")
+
+    # The update path is separate: it needs the existing sha, and the fake in
+    # the unit tests always reports no sha, so this is the only exercise it gets.
+    probe["note"] = "selftest probe, rewritten"
+    if not write(gh, probe):
+        print("FAIL: could not OVERWRITE the probe. The sha-on-update path is "
+              "broken, so every gameweek after the first would 409.")
+        return 1
+    print("ok: overwrote it (sha-on-update path works)")
+    print("\nPASS: the prediction ledger can write. GW7 will record.")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    raise SystemExit(selftest() if "--selftest" in sys.argv else
+                     (print("usage: python3 ledger.py --selftest") or 2))
