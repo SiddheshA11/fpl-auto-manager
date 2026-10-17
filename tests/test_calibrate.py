@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import calibrate
+from calibrate import select_scoreable
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "gw04_ledger.json"
 
@@ -297,3 +298,91 @@ def test_an_outfielder_never_replaces_a_keeper_even_when_next_in_line():
         "no legal substitution exists; an outfielder came on for a keeper"
     )
     assert "p1" in r["started_blanks"]
+
+
+# ------------------------------------- unfinished gameweeks
+
+def test_an_unplayed_gameweek_is_not_scored():
+    """
+    `event/{gw}/live/` answers for an unplayed gameweek with zeros for every
+    player; it does not say "not yet". Scoring that produced a confidently
+    formatted page of nonsense - on GW7, twelve hours after the deadline with
+    0 of 10 fixtures played, it reported a 34-point gameweek and listed SEVEN
+    starters as "played no minutes (a p_start failure, the dominant error)".
+    None of them had kicked a ball.
+    """
+    def fetcher(url, timeout=30):
+        if "fixtures" in url:
+            return [{"finished": False} for _ in range(10)]
+        return None
+
+    assert calibrate.is_settled(7, fetcher) is False
+    assert calibrate.gameweek_progress(7, fetcher) == (0, 10)
+
+
+def test_a_fully_played_gameweek_is_scored():
+    def fetcher(url, timeout=30):
+        if "fixtures" in url:
+            return [{"finished": True} for _ in range(10)]
+        return None
+
+    assert calibrate.is_settled(4, fetcher) is True
+
+
+def test_a_partially_played_gameweek_is_not_settled():
+    """A Saturday 3pm snapshot is the most tempting moment to misread."""
+    def fetcher(url, timeout=30):
+        if "fixtures" in url:
+            return [{"finished": i < 6} for i in range(10)]
+        return None
+
+    assert calibrate.is_settled(7, fetcher) is False
+    assert calibrate.gameweek_progress(7, fetcher) == (6, 10)
+
+
+def test_a_gameweek_with_no_fixtures_is_not_settled():
+    """An empty fixture list must not read as 'all fixtures finished'."""
+    assert calibrate.is_settled(99, lambda url, timeout=30: []) is False
+
+
+def test_recorded_but_unsettled_is_reported_differently_from_empty(capsys):
+    """
+    "The ledger is empty" over a ledger that has records reads as "nothing has
+    submitted yet", which is the same wrong-but-plausible message the 403
+    silently produced.
+    """
+    calibrate.report([], records_found=0)
+    assert "ledger is empty" in capsys.readouterr().out.lower()
+
+    calibrate.report([], records_found=2)
+    out = capsys.readouterr().out
+    assert "none settled yet" in out and "empty" not in out.lower()
+
+
+def test_selection_skips_unplayed_gameweeks_and_the_probe():
+    """
+    Both guards used to live inside main(), which no test exercises because it
+    does network I/O - so deleting either left the suite green while the tool
+    scored an unplayed gameweek or tried to score the self-test probe.
+    """
+    records = [{"event": 0}, {"event": 6}, {"event": 7}]
+    settled = {6: True, 7: False}
+
+    scoreable, skipped = select_scoreable(
+        records,
+        settled=lambda gw: settled[gw],
+        progress=lambda gw: (0, 10),
+    )
+
+    assert [r["event"] for r in scoreable] == [6], "only the settled gameweek"
+    assert skipped == [(7, 0, 10)]
+
+
+def test_include_unfinished_overrides_the_guard_but_still_drops_the_probe():
+    records = [{"event": 0}, {"event": 7}]
+    scoreable, skipped = select_scoreable(
+        records, include_unfinished=True,
+        settled=lambda gw: False, progress=lambda gw: (0, 10),
+    )
+    assert [r["event"] for r in scoreable] == [7]
+    assert skipped == []

@@ -48,6 +48,7 @@ LEDGER_BRANCH = "predictions"
 RAW = "https://raw.githubusercontent.com/{repo}/{branch}/predictions/gw{gw:02d}.json"
 LIVE = "https://fantasy.premierleague.com/api/event/{gw}/live/"
 BOOTSTRAP = "https://fantasy.premierleague.com/api/bootstrap-static/"
+FIXTURES = "https://fantasy.premierleague.com/api/fixtures/?event={gw}"
 
 # FPL's legal XI shape, by element_type.
 XI_MIN = {1: 1, 2: 3, 3: 2, 4: 1}
@@ -91,6 +92,27 @@ def actuals(gw: int, fetcher=_fetch) -> dict[int, dict]:
     if not data:
         return {}
     return {int(e["id"]): e.get("stats", {}) for e in data.get("elements", [])}
+
+
+def gameweek_progress(gw: int, fetcher=_fetch) -> tuple[int, int]:
+    """(fixtures finished, fixtures total) for a gameweek."""
+    fixtures = fetcher(FIXTURES.format(gw=int(gw))) or []
+    return sum(1 for f in fixtures if f.get("finished")), len(fixtures)
+
+
+def is_settled(gw: int, fetcher=_fetch) -> bool:
+    """
+    Whether a gameweek has been played out, so its numbers mean something.
+
+    `event/{gw}/live/` answers for an unplayed gameweek with zeros for every
+    player - it does not say "not yet". Scoring that produces a confidently
+    formatted page of nonsense: on GW7, twelve hours after the deadline and
+    with 0 of 10 fixtures played, this reported a 34-point gameweek and listed
+    SEVEN starters as having "played no minutes (a p_start failure, the
+    dominant error)". Every one of them simply had not kicked a ball yet.
+    """
+    done, total = gameweek_progress(gw, fetcher)
+    return total > 0 and done == total
 
 
 def _legal(positions: list[int]) -> bool:
@@ -206,10 +228,37 @@ def assess(record: dict, act: dict[int, dict]) -> dict:
     }
 
 
-def report(rows: list[dict]) -> None:
+def select_scoreable(records: list[dict], include_unfinished: bool = False,
+                     settled=is_settled, progress=gameweek_progress):
+    """
+    Split ledger records into (scoreable, skipped-with-reason).
+
+    Pure apart from the injected probes, because this is where the two guards
+    live that a confidently-wrong report depends on - skipping gameweeks still
+    being played, and ignoring the self-test probe written under event 0 - and
+    both previously sat inside main(), untested.
+    """
+    scoreable, skipped = [], []
+    for rec in sorted(records, key=lambda r: int(r["event"])):
+        gw = int(rec["event"])
+        if gw < 1:
+            continue        # the self-test probe writes under event 0
+        if not include_unfinished and not settled(gw):
+            done, total = progress(gw)
+            skipped.append((gw, done, total))
+            continue
+        scoreable.append(rec)
+    return scoreable, skipped
+
+
+def report(rows: list[dict], records_found: int = 0) -> None:
     if not rows:
-        print("The ledger is empty. It starts recording on the next submitting run;\n"
-              "nothing before that gameweek was ever written down.")
+        if records_found:
+            print(f"{records_found} gameweek(s) recorded, none settled yet - nothing to "
+                  f"score. Re-run once the fixtures have been played.")
+        else:
+            print("The ledger is empty. It starts recording on the next submitting run;\n"
+                  "nothing before that gameweek was ever written down.")
         return
 
     print(f"\n{'GW':>3}{'score':>7}{'XI':>5}{'best XI':>9}{'lineup loss':>13}"
@@ -270,18 +319,29 @@ def main() -> int:
     ap.add_argument("--repo", default=DEFAULT_REPO)
     ap.add_argument("--dir", dest="directory",
                     help="read records from a local directory instead of the branch")
+    ap.add_argument("--include-unfinished", action="store_true",
+                    help="score gameweeks still being played (the numbers will be wrong)")
     args = ap.parse_args()
 
     records = load_records(args.gw, repo=args.repo, directory=args.directory)
+    scoreable, skipped = select_scoreable(records, args.include_unfinished)
+
     rows = []
-    for rec in sorted(records, key=lambda r: int(r["event"])):
-        gw = int(rec["event"])
-        act = actuals(gw)
+    for rec in scoreable:
+        act = actuals(int(rec["event"]))
         if not act:
-            logger.info("GW%d has no live data yet; skipping", gw)
+            logger.info("GW%d has no live data yet; skipping", int(rec["event"]))
             continue
         rows.append(assess(rec, act))
-    report(rows)
+
+    for gw, done, total in skipped:
+        print(f"GW{gw} is still being played ({done}/{total} fixtures finished) - "
+              f"skipped. Its live data is zeros for anyone yet to play, which "
+              f"reads as a model failure rather than an unplayed match. "
+              f"Use --include-unfinished to score it anyway.")
+    if skipped:
+        print()
+    report(rows, records_found=len([r for r in records if int(r.get('event', 0)) >= 1]))
     return 0
 
 
