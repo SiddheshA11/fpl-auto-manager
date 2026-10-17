@@ -7,12 +7,15 @@ Updated 2026-08-28. **Deployed**, season in progress, `main` green.
 | | |
 |---|---|
 | team | 5413589 |
-| GW1 | **53 pts** vs a 50 average, overall rank 3,482,299. Every starter played 90'. Haaland (C) returned 2. |
-| GW2 | deadline 28 Aug 17:30 UTC — **NO RUN FIRED**. Squad rolled over: 0 transfers, Haaland (C), XI unchanged. No flagged players in it, so the miss cost nothing visible this week. |
-| Weekly Run | cron **`0 10 * * *`** (daily). `manager.py --respect-window` decides whether today is the day. |
-| Deadline alerting | **NONE. See "the alerting gap" below - this is the top priority.** |
-| Scheduler | disabled, and `deadline_check.yml` depended on it |
-| Tests | 228 local, CI green on main |
+| season to date | **429 pts vs a 386 average (+43)** through GW7. Overall rank 1,849,127. No hits taken all season. |
+| per gameweek | GW1 53 (+3) / GW2 105 (+24) / GW3 49 (-2) / GW4 79 (+10) / GW5 43 (-5) / GW6 69 (+11) / GW7 31 (+2). GW7 still being played at time of writing. |
+| mini leagues | 5 leagues, 94 rivals. Mid-table everywhere. **Read "the decline diagnosis was wrong" below before concluding anything from that** - combined hindsight leak is the 53rd percentile of this field and captaincy the 24th. |
+| deadlines missed | **GW2** (28 Aug, scheduled run never fired) and **GW6** (10 Oct, a run arrived with 1.94h in hand and was rejected by a 2.0h floor, 3.6 minutes short). Both squads rolled over. Nothing missed since the coverage fix, though GW7 did not exercise it - its single qualifying tick would have passed the old band too. |
+| bench points | 61 through GW7, ~8.7/GW. The largest *measured* leak is lineup selection, at the 66th percentile of the field - mildly above average, well inside p90. |
+| Weekly Run | cron **`0 * * * *`** (hourly), acting band **0.5-8h** before the deadline. `manager.py --respect-window` decides, and the `FPL_LAST_SUBMITTED_GW` marker makes repeats no-ops. |
+| Deadline alerting | **LIVE.** `watchdog.yml` hourly; Telegram verified end to end 17 Oct. Alerts on an unsubmitted deadline inside 6h (and dispatches a run), a gameweek missed outright, a submitted team whose marker write failed, its own job failing, and an all-clear every 72h so silence means something. |
+| Scheduler | `scheduler.yml` still disabled and now redundant. `deadline_check.yml` is dispatch-only and unreachable - a real gap, since nothing re-reads availability after Friday press conferences. |
+| Tests | 370 local, CI green on main |
 | accuracy | MAE 0.979, RMSE 1.976, **R2 0.3093** on GW10-38 of 2025-26, reproducible via `python backtest.py --season 2025-26` |
 
 Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R2 0.29-0.35 (Valouxis,
@@ -20,32 +23,45 @@ NTUA 2023, n=6900, several compared models being paid products). Those are
 2022/23 numbers and three seasons stale - treat as a floor, not a target. A
 naive points-per-game baseline scores R2 0.257 on the same data.
 
-## THE ALERTING GAP - fix this before any model work
+## THE ALERTING GAP - CLOSED 17 Oct 2026
 
-On 28 Aug the GW2 deadline passed with **no run at all**. Three layers failed
-independently and **two of them are still broken**:
+Kept for the history, because the shape of the failure is worth remembering.
 
-1. the scheduled run did not fire. It was a Friday and `0 10 * * 5` should have
-   triggered - GitHub drops scheduled runs under load and documents no
-   guarantee. *Mitigated* by the daily cron: five chances instead of one. Not
-   eliminated.
-2. **nothing checked that it fired.** `deadline_check.yml` is
-   `workflow_dispatch:` only. Its own comment says "dynamically triggered by
-   scheduler.yml" - and `scheduler.yml` has been `disabled_inactivity` since
-   April. The safety net has been dead for months and nothing noticed.
-3. **nothing could have told you.** No workflow and no Python file in the repo
-   references Telegram, despite `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`
-   being listed as required secrets. The alerting was designed and never wired.
+On 28 Aug the GW2 deadline passed with **no run at all**, and three layers
+failed independently: the scheduled run did not fire, nothing checked that it
+had, and nothing could have reported it - no workflow and no Python file
+referenced Telegram despite the secrets being listed as required.
 
-**Build the alert against the OUTCOME, not the cron**: "the next deadline is
-inside N hours and there is no successful Weekly Run since the previous
-deadline". A checker that watches the cron dies the same silent death
-`deadline_check` did. It needs its own schedule, and ideally it should also
-complain when it has not heard from itself.
+All three are now fixed and each was verified against the real thing rather
+than inferred:
 
-This is worth more than every accuracy improvement in this repo combined. A
-missed deadline costs a whole gameweek; the entire goals/assists/clean-sheet
-apparatus is worth 0.004 R2.
+- **The run fires.** Hourly cron on a 0.5-8h acting band, chosen by replaying
+  the real arrival stream (GitHub throttles this repo to ~5.5 arrivals/day,
+  median gap 4.25h). The old 2-26h/daily combination admitted exactly one
+  qualifying tick per gameweek for all 38, and GW6 died on a run that arrived
+  with 1.94h in hand against an unjustified 2.0h floor - 3.6 minutes short.
+- **Something checks the outcome.** `watchdog.yml`, hourly, on public endpoints
+  and stdlib only, asking whether a team was submitted rather than whether a
+  cron fired. It also looks BACKWARDS: `next_event` only returns future
+  deadlines, so a missed gameweek was invisible and the watchdog reported
+  `waiting` ninety minutes after GW6 was dropped.
+- **It can tell you.** Telegram wired and verified by an actual delivered
+  message on 17 Oct, not by reading logs - Telegram returns 200 for a
+  well-formed request to a chat it cannot deliver to, so the logs cannot
+  distinguish success from a wrong chat id.
+
+Four things this cost that are worth not repeating:
+
+1. Every one of those defects was live with a green test suite.
+2. Two were found only because something independent re-checked a claim that
+   had already been "validated" - and in two cases the validation was circular,
+   comparing new code against earlier arithmetic that shared the same bug.
+3. The ledger's first write 403ed on a PAT missing `Contents: write`, which
+   logs one warning and exits 0. A self-test caught it; nothing else would
+   have, for a season.
+4. `calibrate.py` scored an unplayed gameweek and reported seven starters as
+   p_start failures. Confidently formatted, silently wrong, in the one lever
+   this repo already believes dominates - so it would have been believed.
 
 ## The single most important fact about this model
 
