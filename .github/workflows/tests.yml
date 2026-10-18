@@ -14,7 +14,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # The suite runs twice (the second pass fails on deprecations) and each
+    # pass is 7-11 minutes depending on the runner. At 20 a slow runner timed
+    # out mid-second-pass and reported "cancelled", which reads as nobody's
+    # fault rather than as a red run.
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
