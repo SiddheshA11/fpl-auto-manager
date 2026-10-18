@@ -165,9 +165,12 @@ def main() -> int:
     k = len(OPTIMISER_ARMS)
     better = [a for a in OPTIMISER_ARMS if hv.loc[a, "mean"] > 0 and hv.loc[a, "p"] < 0.05 / k]
     print(f"  RULE B: {'replace with ' + ', '.join(better) if better else 'every optimiser constant stays'}")
-    print(f"  RULE C: template tilt 0.2 vs 0.0 costs {-hv.loc['own=0.0', 'per_season']:+.1f}"
-          f" pts/season at 0.2 [CI {-hv.loc['own=0.0', 'hi'] / 8 * 38:+.0f},"
-          f" {-hv.loc['own=0.0', 'lo'] / 8 * 38:+.0f}], p={hv.loc['own=0.0', 'p']:.3f}; no change")
+    # The own=0.0 arm is (no tilt) minus (production's 0.2 tilt), so the
+    # tilt's effect is its negation. This line first printed that effect as a
+    # "cost", which read a 62-point gain as a 62-point loss.
+    r = hv.loc["own=0.0"]
+    print(f"  RULE C: the 0.2 template tilt scores {-r['per_season']:+.1f} pts/season against no tilt"
+          f" [CI {-r['hi'] / 8 * 38:+.0f}, {-r['lo'] / 8 * 38:+.0f}], p={r['p']:.3f}; no change")
     return 0
 
 
