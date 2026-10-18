@@ -13,3 +13,5 @@ build/
 
 # Third-party historical dataset: large and reproducible via fetch_data.py
 data/history/
+data/replay_cache/
+data/replay/
