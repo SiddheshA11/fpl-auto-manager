@@ -1,6 +1,12 @@
 """
-An unreadable submission marker was read as "no marker" and the run went on
-to submit. On a dispatch that read is the only idempotency there is.
+Three ways the submit path reported success, or acted, when it should not.
+
+- An unreadable submission marker was read as "no marker" and the run went on
+  to submit. On a dispatch that read is the only idempotency there is.
+- A failed token rotation set `rotation_failed` and nothing read it, so the run
+  exited 0 on a spent token and the next one could not log in.
+- A failed set_lineup exiting 1 had no test: the exit-code stub returns None
+  from get_my_team and never reaches STEP 6, so reverting it stayed green.
 """
 from __future__ import annotations
 
@@ -11,6 +17,8 @@ import pytest
 import github_api
 import manager
 from test_exit_codes import _StubClient
+from test_pipeline import StubClient, _snapshot
+from test_recovery_paths import _squad_and_costs
 
 
 class _Repo:
@@ -120,3 +128,65 @@ def test_an_absent_marker_still_proceeds(monkeypatch, sent):
     _, stub = _dispatch(monkeypatch, _Repo((True, None)))
     assert stub.my_team_calls == 1
     assert sent.messages == []
+
+
+# ------------------------------------------------------------- the rotation
+
+class _RotationFailed(_StubClient):
+    rotation_failed = True
+
+
+def test_a_failed_rotation_alerts_and_fails_even_a_healthy_skip(monkeypatch, sent):
+    stub = _RotationFailed(lead_hours=164.5)
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    monkeypatch.setattr(manager, "_github", lambda: None)
+    monkeypatch.setattr(sys, "argv", ["manager.py", "--respect-window"])
+    assert manager.main() == 1, "a spent token exited 0 green"
+    assert any("ROTATION FAILED" in m for m in sent.messages)
+
+
+def test_a_failed_rotation_is_reported_on_a_refused_login_too(monkeypatch, sent):
+    stub = _RotationFailed(lead_hours=5.0, login_ok=False)
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    monkeypatch.setattr(sys, "argv", ["manager.py"])
+    assert manager.main() == 1
+    assert any("ROTATION FAILED" in m for m in sent.messages)
+
+
+def test_a_clean_rotation_stays_quiet(monkeypatch, sent):
+    stub = _StubClient(lead_hours=164.5)
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    monkeypatch.setattr(sys, "argv", ["manager.py", "--respect-window"])
+    assert manager.main() == 0
+    assert sent.messages == []
+
+
+# ------------------------------------------------------------- the lineup
+
+@pytest.fixture(scope="module")
+def game_state():
+    return _snapshot("bootstrap-static"), _snapshot("fixtures")
+
+
+def test_a_refused_lineup_exits_one_and_leaves_the_marker_unset(game_state, monkeypatch, sent):
+    """
+    Driven to STEP 6 on the real model. Recording the marker here would stand
+    the watchdog down over a team that never went in.
+    """
+    bootstrap, fixtures = game_state
+    owned, costs = _squad_and_costs(bootstrap, fixtures)
+
+    class RefusingClient(StubClient):
+        def set_lineup(self, picks, chip=None):
+            self.lineup_attempts = getattr(self, "lineup_attempts", 0) + 1
+            return None
+
+    client = RefusingClient(bootstrap, fixtures, owned, costs)
+    repo = _Repo((True, None))
+    monkeypatch.setattr(manager, "FPLClient", lambda: client)
+    monkeypatch.setattr(manager, "_github", lambda: repo)
+    monkeypatch.setattr(sys, "argv", ["manager.py"])
+
+    assert manager.main() == 1
+    assert client.lineup_attempts == 1, "the run must actually have reached STEP 6"
+    assert github_api.MARKER_VARIABLE not in repo.written

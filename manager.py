@@ -300,14 +300,42 @@ def _record_submission(event_id: int) -> None:
 
 def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2,
                      force: bool = False) -> dict | None:
+    client = FPLClient()
+    result = _run_weekly_cycle(client, dry_run=dry_run, respect_window=respect_window,
+                               max_hits=max_hits, force=force)
+    # Carried on whatever the run returned, skip or submission alike, so that
+    # main() can fail the job. The flag used to be set and read by nothing: the
+    # run exited 0 green on a spent token and the miss surfaced a gameweek
+    # later as an authentication failure.
+    if isinstance(result, dict) and getattr(client, "rotation_failed", False):
+        result["rotation_failed"] = True
+    return result
+
+
+def _alert_rotation_failed() -> None:
+    notify.from_env().send(
+        "*FPL weekly run*\n\nROTATION FAILED: FPL issued a new refresh token and it "
+        "could not be saved, so the stored `FPL_REFRESH_TOKEN` is spent. This run "
+        "carries on and can still submit; the NEXT run cannot log in. Set "
+        "FPL_REFRESH_TOKEN by hand before the next deadline, and check GH_PAT."
+    )
+
+
+def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = False,
+                      max_hits: int = 2, force: bool = False) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
     logger.info("=" * 60)
 
     logger.info("STEP 1: authenticating")
-    client = FPLClient()
-    if not client.login():
+    login_ok = client.login()
+    # Before the login check: a rotation can fail and the login still be
+    # refused, and either way the human has to act before the next deadline.
+    # Alerted now rather than at the end, so a crash later cannot swallow it.
+    if getattr(client, "rotation_failed", False):
+        _alert_rotation_failed()
+    if not login_ok:
         logger.critical("authentication failed; aborting")
         return None
 
@@ -646,8 +674,11 @@ def main() -> int:
     print(json.dumps(result, indent=2, default=str))
     # A lineup that did not go in is a failed run, even though everything
     # before it worked. It previously logged an error and exited 0. So is a
-    # refusal on an unreadable marker.
-    return 1 if result.get("status") in ("lineup-failed", "marker-unknown") else 0
+    # refusal on an unreadable marker, and a spent refresh token, which leaves
+    # this run fine and the next one locked out.
+    if result.get("status") in ("lineup-failed", "marker-unknown"):
+        return 1
+    return 1 if result.get("rotation_failed") else 0
 
 
 if __name__ == "__main__":
