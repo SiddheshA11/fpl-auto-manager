@@ -258,7 +258,48 @@ can see.
   tilt and the rank purpose remain unmeasurable.
 
 So the harness can veto a change that costs ~90+ points a season and cannot
-resolve anything smaller. The alpha 1.0 point estimate from the old harness
+resolve anything smaller.
+
+**Option 1 done, same day: nine seasons, MDE ~54 pts/season.**
+`augment_history.py` rebuilt the `team` column (and teams/fixtures for
+2016-18; 2019-20's restart renumbered onto 30-38), validated by reproducing
+the real columns on the six seasons that have them - 100% of rows and
+fixtures. The harness now replays 2017-18 to 2025-26: 260 windows,
+effectively 63 independent (was 33), largest season's variance share 0.37
+(was 0.60), and the t-test is now properly calibrated (placebo t sd 1.17
+against 1.15 for t8; with five seasons it was 1.12 against 1.41).
+
+```
+  injected effect   per season   power (9 seasons)   power (5 seasons)
+  0.5 pts/GW            19          20%                  0%
+  1.0 pts/GW            38          50%                 20%
+  1.5 pts/GW            57          85%                 55%
+  2.0 pts/GW            76         100%                 70%
+```
+
+Phase C re-run on nine seasons as a sensitivity check (decisions stand as
+made; nothing was re-decided):
+
+- alpha 1.25 vs 1.5 on accuracy: ahead in **9 of 9 seasons**, 205/261
+  gameweeks, clustered t=4.45 (p=0.002), MAE better (p=0.005). Confirmed.
+- Harness vs production 1.25: reverting to 1.5 is +7.8 pts/season (ns);
+  alpha 1.0 is -10.6 (ns) - **the five-season "veto" of 1.0 (-58, p~0.05)
+  did not replicate**, so part of it was noise. 1.0 still fails accuracy (5
+  of 9 seasons, p=0.22).
+- **FREE_TRANSFER_VALUE is measured inert**, not merely unmeasured: at 0.0 it
+  changes a decision in 1.9% of windows, effect CI +/-3 pts/season; 0.6 is
+  +/-8. Bench weight 0.05/0.3: +/-15. HORIZON 4/6/7 within noise; 3 is -24
+  pts/season (p=0.06). Tilt off: -24 (p=0.11), down from -62 at five seasons.
+
+Two things this exposed that are decisions, not defaults:
+
+- **Production builds priors from three seasons** (`fetch_data.HISTORY_SEASONS
+  = 3`). Adding 2016-20 to the priors moved 2025-26 GW10-38 R2 from 0.3093 to
+  0.3161 at alpha 1.5 - larger than the alpha change itself. Shipping that
+  means fetching and augmenting older seasons in CI.
+- **The harness's priors are "every earlier season"**, not production's
+  three. Kept that way so adding seasons changed one thing at a time; a
+  production-mirroring window would shift every harness number. The alpha 1.0 point estimate from the old harness
 (-40/season) is inside its noise. **Do not run Phase C on it as if it could
 settle the constants.** Options, which are a decision, not a default:
 
