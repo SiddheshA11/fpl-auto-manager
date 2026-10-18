@@ -98,6 +98,32 @@ def _prices(gw_df: pd.DataFrame, gw: int) -> dict[int, float]:
     return {int(r["element"]): float(r["value"]) / 10.0 for _, r in rows.iterrows()}
 
 
+# merged_gw.csv labels goalkeepers "GK" in most seasons and "GKP" in some.
+SQUAD_POSITIONS = ("GK", "GKP", "DEF", "MID", "FWD")
+
+
+def template_ownership(gw_df: pd.DataFrame, gw: int) -> dict[int, float]:
+    """
+    selected_by_percent as it stood at `gw`, reconstructed exactly.
+
+    The dataset carries `selected`, the number of managers owning each player,
+    but not the number of managers. Every squad holds exactly fifteen players,
+    so the sum of `selected` over all players is fifteen times the number of
+    squads - the denominator, with nothing estimated.
+
+    Only squad players count. 2024-25 listed managers as elements (position
+    "AM") for the Assistant Manager chip; they sit outside the fifteen, and
+    left in they inflate the denominator and get a figure FPL never published.
+    """
+    rows = gw_df[(gw_df["GW"] == gw) & gw_df["position"].isin(SQUAD_POSITIONS)]
+    rows = rows.drop_duplicates(subset="element")
+    selected = rows.set_index("element")["selected"].astype(float)
+    squads = selected.sum() / SQUAD_SIZE
+    if squads <= 0:
+        return {}
+    return {int(k): float(v) / squads * 100.0 for k, v in selected.items()}
+
+
 def selling_price(purchase: float, current: float) -> float:
     """
     FPL returns the purchase price plus half of any rise, rounded down to
@@ -242,11 +268,16 @@ def play_gameweek(
     max_hits: int = 2,
     free_transfer_value: float | None = None,
     budget: float = 100.0,
+    ownership_weight: float = 0.0,
+    bench_weight: float | None = None,
 ) -> tuple[SquadState, dict | None]:
     """
     One deadline: plan and apply transfers, then score the XI on what the
     players actually did. Returns the next state and the gameweek's row, or
     None for the row if nothing could be traded. `state` is not modified.
+
+    `ownership_weight` tilts on `selected_by_percent` in `scored`, which the
+    caller must supply (see template_ownership); build_state reports 0.0.
     """
     import optimizer as optimizer_mod
     ftv = optimizer_mod.FREE_TRANSFER_VALUE if free_transfer_value is None else free_transfer_value
@@ -280,8 +311,9 @@ def play_gameweek(
 
     positions = pool.set_index("id")["position"].astype(int).to_dict()
     xp_next = pool.set_index("id")["xp_next"].to_dict()
+    extra = {} if bench_weight is None else {"bench_weight": bench_weight}
     opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
-                         ownership_weight=0.0)
+                         ownership_weight=ownership_weight, **extra)
 
     if not squad:
         sol = opt.build_squad(budget=budget)
