@@ -150,3 +150,19 @@ def test_the_placebo_is_reproducible(data, tmp_path, monkeypatch):
     assert not np.allclose(a.set_index("id")["xp_next"], c.set_index("id")["xp_next"])
     shift = (a.set_index("id")["xp_next"] - base.set_index("id")["xp_next"]).dropna()
     assert abs(shift.mean()) < 0.01 and 0.04 < shift.std() < 0.06
+
+
+def test_the_cache_key_changes_when_the_prior_seasons_do(monkeypatch):
+    """
+    augment_history.py made four more seasons usable, which changed every
+    later season's priors; a key without them served stale scoring.
+    """
+    R._priors_tag.cache_clear()
+    monkeypatch.setattr(S.priors, "available_seasons", lambda: ["2023-24", "2024-25"])
+    before = R._cache_path(SEASON, 5, 1.25)
+    R._priors_tag.cache_clear()
+    monkeypatch.setattr(S.priors, "available_seasons", lambda: ["2022-23", "2023-24", "2024-25"])
+    after = R._cache_path(SEASON, 5, 1.25)
+    R._priors_tag.cache_clear()
+    assert before != after
+

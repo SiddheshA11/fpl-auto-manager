@@ -63,7 +63,11 @@ ROOT = Path(__file__).parent
 CACHE_DIR = ROOT / "data" / "replay_cache"
 OUT_DIR = ROOT / "data" / "replay"
 
-SEASONS = ["2021-22", "2022-23", "2023-24", "2024-25", "2025-26"]
+# Every season with at least one usable season before it. 2016-17 to 2019-20
+# became usable once augment_history.py rebuilt the `team` column they lack;
+# before that this list was 2021-22 onward.
+SEASONS = ["2017-18", "2018-19", "2019-20", "2020-21", "2021-22",
+           "2022-23", "2023-24", "2024-25", "2025-26"]
 SCORE_HORIZON = 8
 DEFAULT_L = 8
 DEFAULT_TERMINAL = 4
@@ -135,8 +139,20 @@ def parse_arm(spec: str) -> Arm:
 # ------------------------------------------------------------------ scoring
 
 
+@functools.lru_cache(maxsize=None)
+def _priors_tag(season: str) -> str:
+    """
+    Which seasons built this season's priors. Part of every cache key: making
+    four more seasons usable changed the priors for every season after them,
+    and a key without this served the old scoring as if nothing had changed.
+    """
+    earlier = [s for s in S.priors.available_seasons() if s < season]
+    return hashlib.sha1(",".join(earlier).encode()).hexdigest()[:8]
+
+
 def _cache_path(season: str, gw: int, alpha: float) -> Path:
-    return CACHE_DIR / f"{season}_gw{gw:02d}_alpha{alpha!r}_h{SCORE_HORIZON}.pkl"
+    return (CACHE_DIR / f"{season}_gw{gw:02d}_alpha{alpha!r}_h{SCORE_HORIZON}"
+                        f"_p{_priors_tag(season)}.pkl")
 
 
 def score_with_order(data: S.SeasonData, gw: int, horizon: int) -> tuple[pd.DataFrame, list[int]]:
@@ -297,7 +313,7 @@ def _frozen_points(arm: Arm, season: str, squad: list[int], gws: list[int]) -> i
 
 
 def _baseline_path(season: str) -> Path:
-    return CACHE_DIR / f"baseline_{season}_{Arm().key()}.pkl"
+    return CACHE_DIR / f"baseline_{season}_{Arm().key()}_p{_priors_tag(season)}.pkl"
 
 
 def _baseline_task(season: str) -> str:
