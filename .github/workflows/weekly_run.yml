@@ -1,7 +1,7 @@
 name: FPL Auto Manager - Weekly Run
 
 on:
-  # Hourly. manager.py acts only inside a 2-6h window before the deadline, and
+  # Hourly. manager.py acts only inside a 0.5-8h window before the deadline, and
   # the gate job below decides that in a few seconds without installing
   # anything or logging in, so the other ~20 ticks a day are nearly free.
   #
@@ -14,8 +14,10 @@ on:
   # Widening the window instead of the sampling would have been worse: a
   # 6-hourly cron on the old 2-26h band gives four ticks but the first one
   # acts, at a lead of 22.0-25.5h, deciding every week on day-old team news.
-  # Hourly on a 2-6h band gives four qualifying ticks for every one of the 38
-  # gameweeks, the acting tick at a lead of 5.0-5.5h, three spares behind it.
+  # Hourly was meant to give four qualifying ticks a gameweek. GitHub
+  # throttles it to ~5.5 arrivals a day instead, which is why GW6 was lost on
+  # the 2-6h band; measure_deadline_coverage.py replays the real arrival
+  # stream and puts the 0.5-8h band at 98.9%, conditional on the cron firing.
   # The FPL_LAST_SUBMITTED_GW marker is what stops the spares resubmitting.
   schedule:
     - cron: '0 * * * *'
