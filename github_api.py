@@ -31,10 +31,14 @@ class GitHubRepo:
     nothing here is exercised against the live API by the suite.
     """
 
-    def __init__(self, repo: str, token: str, opener=None):
+    def __init__(self, repo: str, token: str, opener=None,
+                 api_base: str = "https://api.github.com"):
         self.repo = repo
         self._token = token
         self._opener = opener or self._urlopen
+        # A seam for the behavioural tests, which serve the API from a local
+        # socket so the real urllib transport is what gets exercised.
+        self._api_base = api_base.rstrip("/")
 
     def _urlopen(self, url: str, method: str, payload: dict | None):
         data = json.dumps(payload).encode() if payload is not None else None
@@ -55,16 +59,26 @@ class GitHubRepo:
             return None, {}
 
     def _api(self, path: str, method: str = "GET", payload: dict | None = None):
-        return self._opener(f"https://api.github.com/repos/{self.repo}{path}", method, payload)
+        return self._opener(f"{self._api_base}/repos/{self.repo}{path}", method, payload)
 
     def get_variable(self, name: str) -> str | None:
+        return self.read_variable(name)[1]
+
+    def read_variable(self, name: str) -> tuple[bool, str | None]:
+        """
+        (known, value). `known` is False when the API could not say - a 5xx, a
+        403, a network failure - which get_variable reports as None, the same
+        as a variable that does not exist. That conflation is harmless for the
+        watchdog and dangerous for the weekly run, where "no marker" means
+        "go ahead and submit".
+        """
         status, body = self._api(f"/actions/variables/{name}")
         if status == 200:
-            return body.get("value")
+            return True, body.get("value")
         if status == 404:
-            return None
+            return True, None
         logger.warning("could not read variable %s: status %s", name, status)
-        return None
+        return False, None
 
     def set_variable(self, name: str, value: str) -> bool:
         # PATCH first: the variable usually exists, so this is one call in the

@@ -221,16 +221,48 @@ def _github() -> github_api.GitHubRepo | None:
     return github_api.GitHubRepo(repo, token)
 
 
-def _marker_gameweek() -> int | None:
-    """The gameweek last submitted for, per the repo variable."""
+# Returned by _marker_gameweek when GitHub could not say which gameweek was
+# last submitted. Distinct from None, which means there is no marker at all.
+MARKER_UNKNOWN = object()
+MARKER_READ_ATTEMPTS = 3
+MARKER_RETRY_SECONDS = 5.0
+
+
+def _marker_gameweek(sleep=None) -> int | None | object:
+    """
+    The gameweek last submitted for, per the repo variable: an int, None if
+    there is no marker, or MARKER_UNKNOWN if it could not be read.
+
+    On a dispatch this read is the ONLY idempotency in the system - the gate
+    job that also checks the marker runs on the schedule alone. Reading a
+    transient 500 as "no marker" therefore resubmitted the gameweek, with its
+    free transfers already spent and a -4 available to spend them.
+    """
+    import time
+
+    sleep = sleep or time.sleep
     gh = _github()
     if gh is None:
         # A local run has no marker and must not be blocked by its absence.
         return None
-    try:
-        return int(str(gh.get_variable(github_api.MARKER_VARIABLE)).strip())
-    except (TypeError, ValueError):
+    for attempt in range(MARKER_READ_ATTEMPTS):
+        if attempt:
+            sleep(MARKER_RETRY_SECONDS * attempt)
+        known, value = gh.read_variable(github_api.MARKER_VARIABLE)
+        if known:
+            break
+    else:
+        return MARKER_UNKNOWN
+    if value is None or not str(value).strip():
         return None
+    try:
+        return int(str(value).strip())
+    except ValueError:
+        # Something other than this code wrote it. Guessing is how a
+        # gameweek gets submitted twice.
+        logger.error("the %s marker holds %r, which is not a gameweek",
+                     github_api.MARKER_VARIABLE, value)
+        return MARKER_UNKNOWN
 
 
 def _record_submission(event_id: int) -> None:
@@ -268,14 +300,42 @@ def _record_submission(event_id: int) -> None:
 
 def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hits: int = 2,
                      force: bool = False) -> dict | None:
+    client = FPLClient()
+    result = _run_weekly_cycle(client, dry_run=dry_run, respect_window=respect_window,
+                               max_hits=max_hits, force=force)
+    # Carried on whatever the run returned, skip or submission alike, so that
+    # main() can fail the job. The flag used to be set and read by nothing: the
+    # run exited 0 green on a spent token and the miss surfaced a gameweek
+    # later as an authentication failure.
+    if isinstance(result, dict) and getattr(client, "rotation_failed", False):
+        result["rotation_failed"] = True
+    return result
+
+
+def _alert_rotation_failed() -> None:
+    notify.from_env().send(
+        "*FPL weekly run*\n\nROTATION FAILED: FPL issued a new refresh token and it "
+        "could not be saved, so the stored `FPL_REFRESH_TOKEN` is spent. This run "
+        "carries on and can still submit; the NEXT run cannot log in. Set "
+        "FPL_REFRESH_TOKEN by hand before the next deadline, and check GH_PAT."
+    )
+
+
+def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = False,
+                      max_hits: int = 2, force: bool = False) -> dict | None:
     logger.info("=" * 60)
     logger.info("FPL Auto Manager - weekly run (%s)", datetime.now(timezone.utc).isoformat())
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
     logger.info("=" * 60)
 
     logger.info("STEP 1: authenticating")
-    client = FPLClient()
-    if not client.login():
+    login_ok = client.login()
+    # Before the login check: a rotation can fail and the login still be
+    # refused, and either way the human has to act before the next deadline.
+    # Alerted now rather than at the end, so a crash later cannot swallow it.
+    if getattr(client, "rotation_failed", False):
+        _alert_rotation_failed()
+    if not login_ok:
         logger.critical("authentication failed; aborting")
         return None
 
@@ -303,6 +363,21 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
     # purpose.
     if not force:
         already = _marker_gameweek()
+        if already is MARKER_UNKNOWN:
+            # Fails closed. A double submission can take a hit; refusing costs
+            # this tick, and the next hourly tick or the watchdog retries. If
+            # GitHub stays unreadable until the deadline the watchdog, which
+            # reads the same variable, alerts on it.
+            logger.critical("could not read the %s marker, so cannot tell whether GW%d "
+                            "was already submitted; refusing rather than risk submitting "
+                            "twice. --force overrides.", github_api.MARKER_VARIABLE, event_id)
+            notify.from_env().send(
+                f"*FPL weekly run*\n\nGW{event_id}: could not read the "
+                f"`{github_api.MARKER_VARIABLE}` marker from GitHub, so the run refused to "
+                "submit rather than risk a second submission. The next tick will retry. "
+                "If this repeats, check GH_PAT and GitHub's status."
+            )
+            return {"status": "marker-unknown", "event_id": event_id}
         if already is not None and already == event_id:
             logger.info("GW%d has already been submitted; nothing to do", event_id)
             return {"status": "already-submitted", "event_id": event_id}
@@ -598,8 +673,12 @@ def main() -> int:
         return 1
     print(json.dumps(result, indent=2, default=str))
     # A lineup that did not go in is a failed run, even though everything
-    # before it worked. It previously logged an error and exited 0.
-    return 1 if result.get("status") == "lineup-failed" else 0
+    # before it worked. It previously logged an error and exited 0. So is a
+    # refusal on an unreadable marker, and a spent refresh token, which leaves
+    # this run fine and the next one locked out.
+    if result.get("status") in ("lineup-failed", "marker-unknown"):
+        return 1
+    return 1 if result.get("rotation_failed") else 0
 
 
 if __name__ == "__main__":
