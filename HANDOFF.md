@@ -84,6 +84,14 @@ Acting on it — folding recent minutes into the start rate — moved R² from
 
 ## What to build next, in order
 
+**Read "Open after the 17 Oct audits" below first.** Item 1 there - the
+decision-replay harness - is now the precondition for Priority 3 in this
+section and for every "measured null" claim in this file. Priority 2 below is
+DONE: the rank-aware objective shipped (field ownership, captain tilt
+machinery), though the field-vs-template question is unresolved rather than
+settled and the captain weight is deliberately 0.0.
+
+
 Ranked against the two measured facts that should govern everything: minutes
 dominate accuracy, and the decision side has a noise floor that most changes
 cannot clear. Anything not on this list should have to argue against these.
@@ -159,6 +167,149 @@ permanently.
 
 Team value and price changes (now that the budget binds at +0.20), and the
 bonus-curve refit. Both are small; the bonus curve is inside the 0.004.
+
+## Open after the 17 Oct audits - ranked, with what is blocked by what
+
+Two independent audits (engineering, statistics) ran over the 12-17 Oct work.
+The four with a live failure mode are fixed and merged. These are the rest,
+and the ordering is not arbitrary: **item 1 is the precondition for every
+accuracy question in this file.**
+
+### 1. The decision-replay harness has no power. Fix this first.
+
+`simulate.py` is the only honest judge of an optimiser change, and as used it
+cannot resolve anything:
+
+- **n = 4 seasons.** The two-sided sign test therefore floors at **p = 0.125** -
+  no outcome could reject at 5%. MDE at 80% power is **~135 points/season** for
+  the alpha-1.0 candidate and ~96 for alpha-1.25; resolving the observed effect
+  sizes would need **21 and 116 seasons**.
+- **The response surface is piecewise constant**, not smooth. In 2024-25 alone,
+  horizon 6 scores -240 while horizon 7 scores +54. A 1% alpha change moves one
+  season by 19 points: one arbitrary decision flip is worth ~20 points, so the
+  measured -39.8 is consistent with 1-3 flips landing by chance. The
+  paired-difference model (additive effect + mean-zero noise) is mis-specified
+  for a step response.
+- **The horizon "control" is not a null.** Pooled over h3/h4/h6/h7 x 4 seasons
+  the mean is **-45.2, not 0**, and h3 alone is -78.8 at **t=-3.96, p=0.029,
+  4/4 negative**. It is biased negative by construction because everything else
+  in the model was tuned at h=5. Using its *spread* as a noise floor conflates
+  a real mean shift with noise, so the rule "a candidate must clear the
+  control's spread" fails on both halves.
+- `np.std` (ddof=0) was used for 4-season sample spreads, understating sample
+  sd by 13%.
+
+What to build: get n into the hundreds - every (season x start-gameweek) as a
+separate short replay is the cheap route - use a **provably null placebo**
+(alpha +/- 1e-6 moves nothing; verified) instead of the horizon, and report
+decision-flip step size separately from any variance estimate. A full season
+replays in ~50s, so this is minutes of compute, not hours.
+
+**Until this exists, do not retune any optimiser constant, and do not read
+"measured null" anywhere in this file as "measured to be zero".** The alpha
+question in particular is *unanswerable with the current harness*, not closed:
+the accuracy side has real power (paired per-gameweek, alpha 1.0 beats 1.5 at
+**t=7.9 pooled, 50/58 gameweeks**) and was overruled by a zero-power decision
+test.
+
+### 2. The ledger records only the 15 chosen players
+
+So the claim that in-season r=0.251 is range restriction rather than model
+degradation **cannot be tested from the data the system records**. Measured
+attenuation accounts for about half the drop (Thorndike Case II predicts
+r=0.332 against 0.173 observed); the rest is population mismatch - the full
+pool is ~780 players, most of whom do not play and are predicted near zero.
+Note the comparison was also r-against-R2, which are different estimators; the
+comparable full-pool figure is r=0.565.
+
+Fix: log the top ~100 by xP, or a stratified sample across the xP range, each
+gameweek. A few KB, and it makes the claim checkable in one gameweek.
+
+### 3. Both deadline arms depend on the same scheduler
+
+The coverage model's only failure mode is "no tick arrived in band", which is
+not what caused either real miss: GW2 was a scheduled run that never fired,
+and the watchdog's first scheduled run died of `ModuleNotFoundError`. Two
+workflows in this repo are `disabled_inactivity` **right now**, and the two
+"independent" arms correlate at **r=+0.54** on hour-of-day with watchdog
+arrivals clustering nearer weekly arrivals than independent phase predicts
+(p=0.029). An Actions outage, a quota stop or an inactivity disable kills both
+at once. The season runs to 2027-05-30.
+
+The watchdog's own design rule - watch the outcome, not the cron - is violated
+at the only level that matters: its liveness depends on the scheduler it is
+backstopping. Fix: an off-GitHub liveness check, and report coverage as a range
+**conditional on the cron firing at all**.
+
+### 4. The coverage figures have no committed harness
+
+Unique among this repo's claims, which otherwise all ship a `measure_*.py`. The
+81.3% / 94.8% / 100% numbers exist only as prose. An independent re-derivation
+got 69.7% for the old band and 99.0% for the new one by replaying the real
+arrival stream instead of resampling i.i.d. gaps - **lag-1 autocorrelation is
++0.814**, so the i.i.d. bootstrap was invalid and optimistic by 11.6pp on the
+old band. Commit `measure_deadline_coverage.py` and state the honest range.
+
+### 5. Smaller, confirmed, each with a real failure mode
+
+- **`always()` makes a weekly run uncancellable.** `gh run cancel` will not
+  stop `manage-team` from submitting, so a bad decision spotted mid-run cannot
+  be aborted. `!cancelled() && (...)` keeps fail-open on gate *failure* while
+  restoring cancellability.
+- **`_marker_gameweek()` conflates "absent", "forbidden" and "network failed"
+  into "proceed".** On the dispatch path - including the watchdog's own
+  remediation - that single API call is the only idempotency in the system, so
+  one transient 500 resubmits the gameweek. Return a sentinel for "could not
+  determine" and refuse to proceed on it.
+- **`tilt_source` is never passed**, so every ledger record says `null`. Given
+  the tilt silently falls back to the template when the fan-out fails, this is
+  the one field that would distinguish a field-tilted gameweek afterwards.
+- **A failed `set_lineup` exiting 1 is untested.** Reverting it leaves the
+  suite green; `test_exit_codes.py`'s stub returns `None` from `get_my_team`
+  and never reaches STEP 6.
+- **`github_api.py` has no behavioural tests.** The ledger self-test now
+  exercises the live path, but nothing covers payload shape, base64 or
+  sha-on-update locally. Use a local `http.server`, as `test_notify.py` does.
+- **`rotation_failed` is set and never read by `manager.py`.** A failed token
+  rotation logs CRITICAL, sets a flag nobody checks, and exits 0 green; the
+  miss surfaces a gameweek later as an auth failure.
+- **The stdlib-only test whitelists `config` without scanning it.** If anything
+  in the watchdog graph grew `import config` and config grew a third-party
+  import, the test passes and the watchdog dies of the exact outage it was
+  written for. Walk the graph transitively instead.
+- **The captain tilt never tilts the vice-captain** (chosen outside the solver
+  on raw `captain_col`), and at w >~ 20 every effective captain score clips to
+  zero and `argmax` falls back to index order with no guard.
+- **`test_pipeline.py` exercises mutually exclusive branches** locally and in
+  CI. The committed snapshot is pre-season, so locally the whole file runs the
+  pre-season path (`free_transfers = 15`, zero free-transfer value) while CI
+  runs in-season with real hit pricing. Neither environment covers both.
+- **Nothing asserts an upper bound on skipped tests.** ~20 data-conditional
+  skip sites remain; `-rs` prints them but no test fails on a skip.
+- **Dead code, confirmed:** `deadline_scheduler.py` (only referrer
+  `scheduler.yml`, disabled - and if re-enabled it dispatches at a 20-28h lead,
+  the stale-news behaviour the current design rejects), `league_analyzer.py`
+  (superseded by `rivals.py`), `token_refresh.py` - which still pins
+  **playwright** in `requirements.txt`, installed on every weekly run, a large
+  dependency on the critical path 0.5-8h before a deadline for a disabled
+  workflow.
+- **`deadline_check.yml` is a capability gap, not just cruft.** Dispatch-only
+  and unreachable, and it is the only thing that re-reads availability and
+  repairs the lineup after late team news. The watchdog does not do that.
+
+### 6. What NOT to do
+
+- Do not retune `OUTFIELD_COMPETITION_ALPHA`, `FIELD_OWNERSHIP_WEIGHT`,
+  `FREE_TRANSFER_VALUE`, `DEFAULT_BENCH_WEIGHT` or `HORIZON` before item 1.
+  Every one of them was set by argument, and the harness that would settle them
+  cannot currently resolve a 100-point effect.
+- Do not derive a leak figure without the field distribution beside it. That
+  single omission turned 24th-percentile captaincy into a reported 4.6 pts/GW
+  defect.
+- Do not treat a passing suite as evidence. Every defect found on 17 Oct was
+  live with 350+ tests green, and two were found only because something
+  independent re-checked a claim that had already been "validated" - in two
+  cases circularly, against earlier arithmetic carrying the same bug.
 
 ## Open work
 
