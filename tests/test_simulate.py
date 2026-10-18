@@ -131,3 +131,70 @@ def test_a_short_season_runs_and_scores(tmp_path):
     assert (f["transfers"] >= 0).all()
     assert (f["ft"].between(0, S.MAX_BANKED_TRANSFERS)).all(), "free transfers escaped the cap"
     assert res.total == int(f["net"].sum())
+
+
+# ------------------------------------------------- forking a replay mid-season
+#
+# The decision-replay harness runs a candidate arm from a copy of the
+# baseline's state at some gameweek. That is only sound if the state is
+# complete - nothing a later gameweek depends on lives outside SquadState - and
+# if play_gameweek never mutates the state it was handed. Both are checked on
+# a real season rather than a stub.
+
+FORK_SEASON = "2025-26"
+
+
+@pytest.fixture(scope="module")
+def season_data():
+    import priors
+    if FORK_SEASON not in priors.available_seasons():
+        pytest.skip(f"{FORK_SEASON} not on disk")
+    return S.load_season(FORK_SEASON)
+
+
+def _keys(rows):
+    return [{k: r[k] for k in ("gw", "net", "hits", "transfers", "bank", "ft",
+                               "captain", "ins", "outs", "xi")} for r in rows]
+
+
+def test_a_fork_continues_exactly_as_the_unforked_run(season_data):
+    scored = {gw: S.score_gameweek(season_data, gw) for gw in range(2, 9)}
+
+    straight, state = [], S.SquadState()
+    for gw in range(2, 9):
+        state, row = S.play_gameweek(season_data, state, gw, scored[gw])
+        straight.append(row)
+
+    forked, state = [], S.SquadState()
+    for gw in range(2, 9):
+        if gw == 5:
+            state = state.copy()
+        state, row = S.play_gameweek(season_data, state, gw, scored[gw])
+        forked.append(row)
+
+    assert _keys(straight) == _keys(forked)
+    assert sum(r["transfers"] for r in straight[1:]) > 0, "the window must exercise transfers"
+
+
+def test_play_gameweek_leaves_the_state_it_was_handed_untouched(season_data):
+    scored = {gw: S.score_gameweek(season_data, gw) for gw in (2, 3)}
+    state, _ = S.play_gameweek(season_data, S.SquadState(), 2, scored[2])
+    before = state.copy()
+    S.play_gameweek(season_data, state, 3, scored[3])
+    assert state == before
+
+
+def test_a_state_copy_carries_every_field_and_shares_nothing():
+    """
+    A fork is only as good as the copy. Checked field by field from the
+    dataclass itself, so a field added later is covered without editing this.
+    """
+    import dataclasses
+
+    state = S.SquadState(squad=[1, 2], purchase={1: 5.0}, last_price={1: 5.5, 3: 4.0},
+                         bank=1.3, free_transfers=3)
+    clone = state.copy()
+    for f in dataclasses.fields(S.SquadState):
+        assert getattr(clone, f.name) == getattr(state, f.name), f.name
+        if isinstance(getattr(state, f.name), (list, dict)):
+            assert getattr(clone, f.name) is not getattr(state, f.name), f"{f.name} is shared"

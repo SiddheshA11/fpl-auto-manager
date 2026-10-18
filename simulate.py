@@ -163,6 +163,166 @@ def pick_xi(squad: list[int], positions: dict[int, int], points: dict[int, int],
     return xi, gross, armband
 
 
+@dataclass
+class SeasonData:
+    """Everything about a season that does not change as it is replayed."""
+
+    season: str
+    gw_df: pd.DataFrame
+    raw_df: pd.DataFrame
+    teams_df: pd.DataFrame
+    fixtures: list[dict]
+    game_config: dict
+    prior_set: object
+
+
+def load_season(season: str) -> SeasonData:
+    d = HISTORY_DIR / season
+    gw_df = priors.read_season_csv(d / "merged_gw.csv")
+    raw_df = priors.read_season_csv(d / "players_raw.csv")
+    teams_df = priors.read_season_csv(d / "teams.csv")
+    fixtures = priors.read_season_csv(d / "fixtures.csv").to_dict("records")
+
+    earlier = [s for s in priors.available_seasons() if s < season]
+    if not earlier:
+        raise SystemExit(f"no seasons before {season} on disk; cannot build clean priors")
+    team_codes = {int(r["code"]): r["name"] for _, r in teams_df.iterrows()}
+    prior_set = priors.build_priors(seasons=earlier, current_team_codes=team_codes)
+    logger.info("priors from %s (excluding %s)", earlier, season)
+    return SeasonData(season, gw_df, raw_df, teams_df, fixtures, _scoring_config(), prior_set)
+
+
+@dataclass
+class SquadState:
+    """
+    What a manager carries from one gameweek to the next. Explicit so that a
+    replay can be forked mid-season: two arms that start from copies of the
+    same state differ only by the decisions they go on to make.
+    """
+
+    squad: list[int] = field(default_factory=list)
+    purchase: dict[int, float] = field(default_factory=dict)
+    last_price: dict[int, float] = field(default_factory=dict)
+    bank: float = 0.0
+    free_transfers: int = 1
+
+    def copy(self) -> "SquadState":
+        return SquadState(list(self.squad), dict(self.purchase), dict(self.last_price),
+                          self.bank, self.free_transfers)
+
+
+def has_gameweek(data: SeasonData, gw: int) -> bool:
+    return not data.gw_df[data.gw_df["GW"] == gw].empty
+
+
+def score_gameweek(data: SeasonData, gw: int, horizon: int = 5) -> pd.DataFrame:
+    """The model's view of every player at this deadline. The expensive step."""
+    state = build_state(data.gw_df, data.raw_df, data.teams_df, gw, data.game_config)
+    events = [g for g in range(gw, min(gw + horizon, 39))]
+    model = X.XPModel(state, data.fixtures, data.prior_set, X.ModelConfig(horizon=horizon),
+                      recent_minutes=recent_minutes_for(data.gw_df, gw))
+    return model.expected_points(events)
+
+
+def play_gameweek(
+    data: SeasonData,
+    state: SquadState,
+    gw: int,
+    scored: pd.DataFrame,
+    *,
+    strategy: str = "greedy",
+    horizon: int = 5,
+    max_hits: int = 2,
+    free_transfer_value: float | None = None,
+    budget: float = 100.0,
+) -> tuple[SquadState, dict | None]:
+    """
+    One deadline: plan and apply transfers, then score the XI on what the
+    players actually did. Returns the next state and the gameweek's row, or
+    None for the row if nothing could be traded. `state` is not modified.
+    """
+    import optimizer as optimizer_mod
+    ftv = optimizer_mod.FREE_TRANSFER_VALUE if free_transfer_value is None else free_transfer_value
+    decay = X.ModelConfig(horizon=horizon).horizon_decay
+    horizon_weight = sum(decay ** i for i in range(horizon))
+    events = [g for g in range(gw, min(gw + horizon, 39))]
+    gw_df = data.gw_df
+
+    state = state.copy()
+    squad, purchase, last_price = state.squad, state.purchase, state.last_price
+    bank, free_transfers = state.bank, state.free_transfers
+
+    last_price.update(_prices(gw_df, gw))
+    price_now = dict(last_price)
+    # An unowned player with no row this gameweek cannot be bought, but an
+    # OWNED one must stay in the pool whatever happens. Dropping him makes
+    # him unkeepable, so the solver is forced to transfer him out - and
+    # when several go at once the free-transfer floor
+    # (sum(kept) + hits >= 15 - free_transfers) becomes unsatisfiable and
+    # the whole season aborts. That is what killed the first full run, at
+    # GW34. manager.py keeps owned players for the same reason, though
+    # there the trigger is an injury flag rather than a missing row.
+    tradeable = set(_prices(gw_df, gw))
+    pool = scored[scored["id"].isin(tradeable) | scored["id"].isin(squad)].copy()
+    if pool.empty:
+        return state, None
+    # Price the pool at what things actually cost this gameweek. build_state
+    # falls back to the season-start price for a player with no row, which
+    # would let the optimiser buy at a stale valuation.
+    pool["cost"] = pool["id"].map(price_now).fillna(pool["cost"])
+
+    positions = pool.set_index("id")["position"].astype(int).to_dict()
+    xp_next = pool.set_index("id")["xp_next"].to_dict()
+    opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
+                         ownership_weight=0.0)
+
+    if not squad:
+        sol = opt.build_squad(budget=budget)
+        squad = [int(i) for i in sol.squad["id"]]
+        purchase = {p: price_now.get(p, 0.0) for p in squad}
+        bank = budget - sum(purchase.values())
+        hits, made, ins, outs = 0, 0, list(squad), []
+    else:
+        selling = {p: selling_price(purchase.get(p, price_now.get(p, 0.0)),
+                                    price_now.get(p, purchase.get(p, 0.0)))
+                   for p in squad}
+        sol = _plan_transfers(
+            strategy, opt, pool, squad, bank, free_transfers, selling,
+            max_hits, ftv, horizon_weight, events, None,
+        )
+        new = [int(i) for i in sol.squad["id"]]
+        ins = [p for p in new if p not in squad]
+        outs = [p for p in squad if p not in new]
+        proceeds = sum(selling.get(p, price_now.get(p, 0.0)) for p in outs)
+        spend = sum(price_now.get(p, 0.0) for p in ins)
+        bank = bank + proceeds - spend
+        for p in outs:
+            purchase.pop(p, None)
+        for p in ins:
+            purchase[p] = price_now.get(p, 0.0)
+        if len(new) != SQUAD_SIZE:
+            raise RuntimeError(f"GW{gw}: solver returned {len(new)} players, not {SQUAD_SIZE}")
+        squad = new
+        made = len(ins)
+        hits = max(0, made - free_transfers)
+        free_transfers = min(MAX_BANKED_TRANSFERS, max(1, free_transfers - made + 1))
+
+    points, minutes = _actuals(gw_df, gw)
+    xi, gross, armband = pick_xi(squad, positions, points, minutes, xp_next)
+    net = gross - hits * HIT_COST
+    row = {
+        "gw": gw, "gross": gross, "hits": hits, "net": net,
+        "transfers": made, "bank": round(bank, 1), "ft": free_transfers,
+        "captain": armband, "squad_value": round(sum(price_now.get(p, 0.0) for p in squad), 1),
+        # The decisions themselves, so a forked replay can say whether two
+        # arms actually chose differently rather than only scored differently.
+        "ins": sorted(ins), "outs": sorted(outs), "xi": sorted(xi),
+    }
+    logger.info("GW%-2d %3d pts (gross %3d, %d hit) | %d transfer(s), bank £%.1fm, %d FT",
+                gw, net, gross, hits, made, bank, free_transfers)
+    return SquadState(squad, purchase, last_price, bank, free_transfers), row
+
+
 def simulate_season(
     season: str,
     start_gw: int,
@@ -173,107 +333,18 @@ def simulate_season(
     free_transfer_value: float | None = None,
     budget: float = 100.0,
 ) -> SeasonResult:
-    d = HISTORY_DIR / season
-    gw_df = priors.read_season_csv(d / "merged_gw.csv")
-    raw_df = priors.read_season_csv(d / "players_raw.csv")
-    teams_df = priors.read_season_csv(d / "teams.csv")
-    fixtures = priors.read_season_csv(d / "fixtures.csv").to_dict("records")
-    game_config = _scoring_config()
-
-    earlier = [s for s in priors.available_seasons() if s < season]
-    if not earlier:
-        raise SystemExit(f"no seasons before {season} on disk; cannot build clean priors")
-    team_codes = {int(r["code"]): r["name"] for _, r in teams_df.iterrows()}
-    prior_set = priors.build_priors(seasons=earlier, current_team_codes=team_codes)
-    logger.info("priors from %s (excluding %s)", earlier, season)
-
-    import optimizer as optimizer_mod
-    ftv = optimizer_mod.FREE_TRANSFER_VALUE if free_transfer_value is None else free_transfer_value
-    decay = X.ModelConfig(horizon=horizon).horizon_decay
-    horizon_weight = sum(decay ** i for i in range(horizon))
-
-    squad: list[int] = []
-    purchase: dict[int, float] = {}
-    last_price: dict[int, float] = {}
-    bank = 0.0
-    free_transfers = 1
+    data = load_season(season)
+    state = SquadState()
     result = SeasonResult()
-
     for gw in range(start_gw, end_gw + 1):
-        if gw_df[gw_df["GW"] == gw].empty:
+        if not has_gameweek(data, gw):
             continue
-        state = build_state(gw_df, raw_df, teams_df, gw, game_config)
-        events = [g for g in range(gw, min(gw + horizon, 39))]
-        model = X.XPModel(state, fixtures, prior_set, X.ModelConfig(horizon=horizon),
-                          recent_minutes=recent_minutes_for(gw_df, gw))
-        scored = model.expected_points(events)
-
-        last_price.update(_prices(gw_df, gw))
-        price_now = dict(last_price)
-        # An unowned player with no row this gameweek cannot be bought, but an
-        # OWNED one must stay in the pool whatever happens. Dropping him makes
-        # him unkeepable, so the solver is forced to transfer him out - and
-        # when several go at once the free-transfer floor
-        # (sum(kept) + hits >= 15 - free_transfers) becomes unsatisfiable and
-        # the whole season aborts. That is what killed the first full run, at
-        # GW34. manager.py keeps owned players for the same reason, though
-        # there the trigger is an injury flag rather than a missing row.
-        tradeable = set(_prices(gw_df, gw))
-        pool = scored[scored["id"].isin(tradeable) | scored["id"].isin(squad)].copy()
-        if pool.empty:
-            continue
-        # Price the pool at what things actually cost this gameweek. build_state
-        # falls back to the season-start price for a player with no row, which
-        # would let the optimiser buy at a stale valuation.
-        pool["cost"] = pool["id"].map(price_now).fillna(pool["cost"])
-
-        positions = pool.set_index("id")["position"].astype(int).to_dict()
-        xp_next = pool.set_index("id")["xp_next"].to_dict()
-        opt = SquadOptimizer(pool, value_col="xp_horizon", captain_col="xp_next",
-                             ownership_weight=0.0)
-
-        if not squad:
-            sol = opt.build_squad(budget=budget)
-            squad = [int(i) for i in sol.squad["id"]]
-            purchase = {p: price_now.get(p, 0.0) for p in squad}
-            bank = budget - sum(purchase.values())
-            hits, made = 0, 0
-        else:
-            selling = {p: selling_price(purchase.get(p, price_now.get(p, 0.0)),
-                                        price_now.get(p, purchase.get(p, 0.0)))
-                       for p in squad}
-            sol = _plan_transfers(
-                strategy, opt, pool, squad, bank, free_transfers, selling,
-                max_hits, ftv, horizon_weight, events, model,
-            )
-            new = [int(i) for i in sol.squad["id"]]
-            ins = [p for p in new if p not in squad]
-            outs = [p for p in squad if p not in new]
-            proceeds = sum(selling.get(p, price_now.get(p, 0.0)) for p in outs)
-            spend = sum(price_now.get(p, 0.0) for p in ins)
-            bank = bank + proceeds - spend
-            for p in outs:
-                purchase.pop(p, None)
-            for p in ins:
-                purchase[p] = price_now.get(p, 0.0)
-            if len(new) != SQUAD_SIZE:
-                raise RuntimeError(f"GW{gw}: solver returned {len(new)} players, not {SQUAD_SIZE}")
-            squad = new
-            made = len(ins)
-            hits = max(0, made - free_transfers)
-            free_transfers = min(MAX_BANKED_TRANSFERS, max(1, free_transfers - made + 1))
-
-        points, minutes = _actuals(gw_df, gw)
-        xi, gross, armband = pick_xi(squad, positions, points, minutes, xp_next)
-        net = gross - hits * HIT_COST
-        result.rows.append({
-            "gw": gw, "gross": gross, "hits": hits, "net": net,
-            "transfers": made, "bank": round(bank, 1), "ft": free_transfers,
-            "captain": armband, "squad_value": round(sum(price_now.get(p, 0.0) for p in squad), 1),
-        })
-        logger.info("GW%-2d %3d pts (gross %3d, %d hit) | %d transfer(s), bank £%.1fm, %d FT",
-                    gw, net, gross, hits, made, bank, free_transfers)
-
+        scored = score_gameweek(data, gw, horizon)
+        state, row = play_gameweek(data, state, gw, scored, strategy=strategy,
+                                   horizon=horizon, max_hits=max_hits,
+                                   free_transfer_value=free_transfer_value, budget=budget)
+        if row is not None:
+            result.rows.append(row)
     return result
 
 
