@@ -131,6 +131,13 @@ def pick_xi(squad: list[int], positions: dict[int, int], points: dict[int, int],
     xi = keepers[:1] + outfield[:10]
     bench = keepers[1:] + outfield[10:]
 
+    # Captain and vice are named with the XI, before any autosub: the
+    # highest-xP starters. FPL then gives the armband to the captain if he
+    # played, else the vice if he played, else nobody.
+    by_xp = sorted(xi, key=lambda p: -xp.get(p, 0.0))
+    captain = by_xp[0]
+    vice = by_xp[1] if len(by_xp) > 1 else captain
+
     def legal(sel: list[int]) -> bool:
         counts = {t: sum(1 for p in sel if positions.get(p) == t) for t in (1, 2, 3, 4)}
         return (
@@ -152,14 +159,14 @@ def pick_xi(squad: list[int], positions: dict[int, int], points: dict[int, int],
                 bench.remove(cand)
                 break
 
-    # Captain the highest-xP starter; the vice takes the armband if he blanks,
-    # which is the rule that makes a captain pick recoverable.
-    by_xp = sorted(xi, key=lambda p: -xp.get(p, 0.0))
-    captain = by_xp[0]
-    vice = by_xp[1] if len(by_xp) > 1 else captain
-    armband = captain if minutes.get(captain, 0) > 0 else vice
+    if minutes.get(captain, 0) > 0:
+        armband = captain
+    elif minutes.get(vice, 0) > 0:
+        armband = vice
+    else:
+        armband = None
 
-    gross = sum(points.get(p, 0) for p in xi) + points.get(armband, 0)
+    gross = sum(points.get(p, 0) for p in xi) + (points.get(armband, 0) if armband else 0)
     return xi, gross, armband
 
 

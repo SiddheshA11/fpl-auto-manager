@@ -113,6 +113,26 @@ def test_the_captain_is_doubled_and_the_vice_takes_over_on_a_blank():
     assert gross == sum(points[p] for p in xi) + 6
 
 
+def test_nobody_is_doubled_when_captain_and_vice_both_blank():
+    """
+    FPL's rule: the named captain, else the named vice, else no armband. The
+    armband used to go to the best starter AFTER autosubs, so with both
+    blanking and subbed off it doubled whoever ranked third - points FPL
+    never awards.
+    """
+    xp = {p: 1.0 for p in SQUAD}
+    xp[8], xp[9], xp[10] = 9.0, 8.0, 7.0
+    minutes = {p: 90 for p in SQUAD}
+    points = {p: 2 for p in SQUAD}
+    minutes[8] = minutes[9] = 0
+    points[8] = points[9] = 0
+    points[10] = 12
+
+    xi, gross, armband = S.pick_xi(SQUAD, POSITIONS, points, minutes, xp)
+    assert 8 not in xi and 9 not in xi, "both blanks should have been subbed off"
+    assert gross == sum(points[p] for p in xi), "a third player was doubled"
+
+
 # ─────────────────────── the harness actually runs ───────────────────────
 
 
