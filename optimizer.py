@@ -87,6 +87,10 @@ OWNERSHIP_WEIGHT = 0.0
 # captain term in _base_program.
 CAPTAIN_OWNERSHIP_WEIGHT = 0.0
 
+# A captain the tilt clips to zero keeps this fraction of his expected points,
+# purely as a tie-break; see captain_score.
+CLIPPED_CAPTAIN_SHARE = 1e-6
+
 
 @dataclass
 class SquadSolution:
@@ -195,6 +199,27 @@ class SquadOptimizer:
             0.0, None,
         )
 
+        # What the armband is worth to the objective, and the one ranking both
+        # the captain and the vice are chosen on. A clipped multiplier zeroes a
+        # player's score, and the clip bites at weight 1/(1 - 2c): only 1.25
+        # when the field captains everyone at 10%. With every candidate at zero
+        # the solver's captain was arbitrary - it handed the armband to a
+        # goalkeeper. Clipped players keep a vanishing share of their raw value
+        # instead, so they still rank below anyone the tilt values, and among
+        # themselves by expected points. Nothing is clipped at weight 0.0, so
+        # this leaves the untilted objective bit-identical.
+        clipped = self.captain_risk_multiplier <= 0.0
+        self.captain_score = np.where(
+            clipped, CLIPPED_CAPTAIN_SHARE * self.captain_value,
+            self.captain_value * self.captain_risk_multiplier,
+        )
+        if self.captain_ownership_weight and np.all(clipped[self.captain_value > 0]):
+            logger.warning(
+                "captain_ownership_weight=%.2f clips every captain candidate to zero; "
+                "captaincy falls back to expected-points order",
+                self.captain_ownership_weight,
+            )
+
     # ---------- program construction ----------
     #
     # Variable layout, all binary: [ squad(n) | start(n) | captain(n) ]
@@ -267,7 +292,7 @@ class SquadOptimizer:
         objective = np.concatenate([
             -value * self.bench_weight,                           # owned (bench share)
             -value * (1.0 - self.bench_weight),                   # promoted to XI
-            -self.captain_value * self.captain_risk_multiplier,   # captaincy doubles the score
+            -self.captain_score,                                  # captaincy doubles the score
         ])
         return objective, cons
 
@@ -302,13 +327,24 @@ class SquadOptimizer:
         xi = self.players[y].copy()
         bench = self.players[x & ~y].copy()
 
+        # Given the XI, the best captain is a lookup, not a search, so it is
+        # settled here rather than trusted to a solve that stops at a 1e-4
+        # relative gap - far coarser than the clipped-captain tie-break. The
+        # solver's pick stands whenever it is already the best.
         captain_idx = int(np.argmax(c))
+        xi_idx = np.flatnonzero(y)
+        if len(xi_idx) and self.captain_score[captain_idx] < self.captain_score[xi_idx].max():
+            captain_idx = int(xi_idx[np.argmax(self.captain_score[xi_idx])])
         captain_id = int(self.ids[captain_idx])
 
         # Vice-captain is not a solver decision: it only pays out if the captain
-        # does not play, so it is simply the best remaining starter.
-        vice_pool = xi[xi["id"] != captain_id].sort_values(self.captain_col, ascending=False)
-        vice_id = int(vice_pool.iloc[0]["id"]) if len(vice_pool) else captain_id
+        # does not play, so it is simply the best remaining starter - on the
+        # same tilted score the captain was chosen on. It used to sort raw
+        # captain_col, so the vice ignored the captain tilt entirely.
+        score = pd.Series(self.captain_score, index=self.players.index)
+        vice_pool = xi[xi["id"] != captain_id]
+        vice_id = (int(vice_pool.loc[score[vice_pool.index].idxmax(), "id"])
+                   if len(vice_pool) else captain_id)
 
         # Bench order: keeper first (he can only replace the keeper), then by
         # descending chance of actually returning points.
