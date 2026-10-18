@@ -1,6 +1,6 @@
 # Handoff — FPL Auto Manager
 
-Updated 2026-08-28. **Deployed**, season in progress, `main` green.
+Updated 2026-10-18. **Deployed**, season in progress, `main` green.
 
 ## State
 
@@ -12,10 +12,10 @@ Updated 2026-08-28. **Deployed**, season in progress, `main` green.
 | mini leagues | 5 leagues, 94 rivals. Mid-table everywhere. **Read "the decline diagnosis was wrong" below before concluding anything from that** - combined hindsight leak is the 53rd percentile of this field and captaincy the 24th. |
 | deadlines missed | **GW2** (28 Aug, scheduled run never fired) and **GW6** (10 Oct, a run arrived with 1.94h in hand and was rejected by a 2.0h floor, 3.6 minutes short). Both squads rolled over. Nothing missed since the coverage fix, though GW7 did not exercise it - its single qualifying tick would have passed the old band too. |
 | bench points | 61 through GW7, ~8.7/GW. The largest *measured* leak is lineup selection, at the 66th percentile of the field - mildly above average, well inside p90. |
-| Weekly Run | cron **`0 * * * *`** (hourly), acting band **0.5-8h** before the deadline. `manager.py --respect-window` decides, and the `FPL_LAST_SUBMITTED_GW` marker makes repeats no-ops. |
+| Weekly Run | cron **`0 * * * *`** (hourly), acting band **0.5-8h** before the deadline: 98.9-99.5% coverage, conditional on the cron firing (`measure_deadline_coverage.py`). `manager.py --respect-window` decides, and the `FPL_LAST_SUBMITTED_GW` marker makes repeats no-ops; an unreadable marker now refuses rather than proceeds. Cancellable with `gh run cancel`. |
 | Deadline alerting | **LIVE.** `watchdog.yml` hourly; Telegram verified end to end 17 Oct. Alerts on an unsubmitted deadline inside 6h (and dispatches a run), a gameweek missed outright, a submitted team whose marker write failed, its own job failing, and an all-clear every 72h so silence means something. |
-| Scheduler | `scheduler.yml` still disabled and now redundant. `deadline_check.yml` is dispatch-only and unreachable - a real gap, since nothing re-reads availability after Friday press conferences. |
-| Tests | 370 local, CI green on main |
+| Scheduler | `scheduler.yml`, `token_refresh.yml` and their scripts deleted 18 Oct. `deadline_check.yml` is dispatch-only and unreachable - a real gap, since nothing re-reads availability after Friday press conferences. |
+| Tests | 419 local (2 data-conditional skips), 417 in CI (4), green on main |
 | accuracy | MAE 0.979, RMSE 1.976, **R2 0.3093** on GW10-38 of 2025-26, reproducible via `python backtest.py --season 2025-26` |
 
 Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R2 0.29-0.35 (Valouxis,
@@ -175,6 +175,11 @@ The four with a live failure mode are fixed and merged. These are the rest,
 and the ordering is not arbitrary: **item 1 is the precondition for every
 accuracy question in this file.**
 
+**18 Oct: Phase A is done** (#31-#35). Items 2 and 4 are closed, and every
+item in 5 is fixed except the three marked open. Item 1 (the harness) is next;
+item 3 still needs a decision. What changed in the reading of each is noted
+inline - two of the audit's own claims did not survive measurement.
+
 ### 1. The decision-replay harness has no power. Fix this first.
 
 `simulate.py` is the only honest judge of an optimiser change, and as used it
@@ -212,7 +217,21 @@ the accuracy side has real power (paired per-gameweek, alpha 1.0 beats 1.5 at
 **t=7.9 pooled, 50/58 gameweeks**) and was overruled by a zero-power decision
 test.
 
-### 2. The ledger records only the 15 chosen players
+### 2. The ledger records only the 15 chosen players - FIXED 18 Oct (#31)
+
+Schema 2 adds `pool`: id, position, xp_next, p_start, exp_minutes and
+availability for **every** scored player, columnar, ~17KB a gameweek. GW8 is
+the first gameweek recorded with it; GW1-7 cannot be backfilled. Not the
+top-100 cut suggested below: on the snapshot the top 100 keep an xP sd of
+0.547 against 1.197 for the pool, so a top-100 log is itself range
+restricted and would not answer the question. `tilt_source` is now recorded
+too (it was null in every record).
+
+Next step once GW8 settles: compute r over the pool and over the squad from
+the same gameweek, which separates range restriction from degradation
+directly instead of through Thorndike.
+
+Original note:
 
 So the claim that in-season r=0.251 is range restriction rather than model
 degradation **cannot be tested from the data the system records**. Measured
@@ -241,7 +260,24 @@ at the only level that matters: its liveness depends on the scheduler it is
 backstopping. Fix: an off-GitHub liveness check, and report coverage as a range
 **conditional on the cron firing at all**.
 
-### 4. The coverage figures have no committed harness
+### 4. The coverage figures have no committed harness - FIXED 18 Oct (#35)
+
+`measure_deadline_coverage.py`, arrivals committed in `data/arrivals.json`.
+Replay of the real stream: **69.8%** old band, **98.9%** new (the independent
+re-derivation's 69.7 / 99.0 reproduce); the i.i.d. control reproduces the old
+81.3 / 94.5 / 99.8, so the arithmetic was right and the method wrong. Old band
+plus old watchdog was **83.2%**, not 94.8%. Replaying each past deadline on its
+own day reproduces reality (GW6 missed on the old band, GW3-5 and 7 caught).
+
+**The mechanism below is wrong.** Gap lag-1 r measures 0.507, not 0.814, and
+it does not matter: the real stream replayed at uniform times of day matches
+i.i.d. to 0.2pp. The whole correction is **time of day** - deadlines cluster
+at 12:30-13:30 and 17:30-18:30 UTC, where GitHub's arrivals are thin. Whether
+that persists past 44 days is unknown, so figures are quoted as a range. This
+bears on item 3: hour-of-day structure is exactly what an off-GitHub check
+would not share.
+
+Original note:
 
 Unique among this repo's claims, which otherwise all ship a `measure_*.py`. The
 81.3% / 94.8% / 100% numbers exist only as prose. An independent re-derivation
@@ -252,48 +288,48 @@ old band. Commit `measure_deadline_coverage.py` and state the honest range.
 
 ### 5. Smaller, confirmed, each with a real failure mode
 
-- **`always()` makes a weekly run uncancellable.** `gh run cancel` will not
+- FIXED (#32). **`always()` makes a weekly run uncancellable.** `gh run cancel` will not
   stop `manage-team` from submitting, so a bad decision spotted mid-run cannot
   be aborted. `!cancelled() && (...)` keeps fail-open on gate *failure* while
   restoring cancellability.
-- **`_marker_gameweek()` conflates "absent", "forbidden" and "network failed"
+- FIXED (#32): 3 reads with backoff, then refuse + Telegram + exit 1. Fails closed on purpose. **`_marker_gameweek()` conflates "absent", "forbidden" and "network failed"
   into "proceed".** On the dispatch path - including the watchdog's own
   remediation - that single API call is the only idempotency in the system, so
   one transient 500 resubmits the gameweek. Return a sentinel for "could not
   determine" and refuse to proceed on it.
-- **`tilt_source` is never passed**, so every ledger record says `null`. Given
+- FIXED (#31). **`tilt_source` is never passed**, so every ledger record says `null`. Given
   the tilt silently falls back to the template when the fan-out fails, this is
   the one field that would distinguish a field-tilted gameweek afterwards.
-- **A failed `set_lineup` exiting 1 is untested.** Reverting it leaves the
+- FIXED (#32). **A failed `set_lineup` exiting 1 is untested.** Reverting it leaves the
   suite green; `test_exit_codes.py`'s stub returns `None` from `get_my_team`
   and never reaches STEP 6.
-- **`github_api.py` has no behavioural tests.** The ledger self-test now
+- FIXED (#32). **`github_api.py` has no behavioural tests.** The ledger self-test now
   exercises the live path, but nothing covers payload shape, base64 or
   sha-on-update locally. Use a local `http.server`, as `test_notify.py` does.
-- **`rotation_failed` is set and never read by `manager.py`.** A failed token
+- FIXED (#32): alerts right after login, still submits, exits 1. **`rotation_failed` is set and never read by `manager.py`.** A failed token
   rotation logs CRITICAL, sets a flag nobody checks, and exits 0 green; the
   miss surfaces a gameweek later as an auth failure.
-- **The stdlib-only test whitelists `config` without scanning it.** If anything
+- FIXED (#33). **The stdlib-only test whitelists `config` without scanning it.** If anything
   in the watchdog graph grew `import config` and config grew a third-party
   import, the test passes and the watchdog dies of the exact outage it was
   written for. Walk the graph transitively instead.
-- **The captain tilt never tilts the vice-captain** (chosen outside the solver
+- FIXED (#33). The clip threshold is 1/(1-2c) - **w = 1.25** at 10% captaincy, not ~20 - and reproduced, the arbitrary captain was a goalkeeper. Bit-identical at the production weight 0.0. **The captain tilt never tilts the vice-captain** (chosen outside the solver
   on raw `captain_col`), and at w >~ 20 every effective captain score clips to
   zero and `argmax` falls back to index order with no guard.
-- **`test_pipeline.py` exercises mutually exclusive branches** locally and in
+- OPEN. **`test_pipeline.py` exercises mutually exclusive branches** locally and in
   CI. The committed snapshot is pre-season, so locally the whole file runs the
   pre-season path (`free_transfers = 15`, zero free-transfer value) while CI
   runs in-season with real hit pricing. Neither environment covers both.
-- **Nothing asserts an upper bound on skipped tests.** ~20 data-conditional
+- OPEN. **Nothing asserts an upper bound on skipped tests.** ~20 data-conditional
   skip sites remain; `-rs` prints them but no test fails on a skip.
-- **Dead code, confirmed:** `deadline_scheduler.py` (only referrer
+- DELETED (#34), with `token_refresh.yml`, and playwright is off the weekly run. **Dead code, confirmed:** `deadline_scheduler.py` (only referrer
   `scheduler.yml`, disabled - and if re-enabled it dispatches at a 20-28h lead,
   the stale-news behaviour the current design rejects), `league_analyzer.py`
   (superseded by `rivals.py`), `token_refresh.py` - which still pins
   **playwright** in `requirements.txt`, installed on every weekly run, a large
   dependency on the critical path 0.5-8h before a deadline for a disabled
   workflow.
-- **`deadline_check.yml` is a capability gap, not just cruft.** Dispatch-only
+- OPEN, needs a decision. **`deadline_check.yml` is a capability gap, not just cruft.** Dispatch-only
   and unreachable, and it is the only thing that re-reads availability and
   repairs the lineup after late team news. The watchdog does not do that.
 
@@ -984,6 +1020,15 @@ Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
 - **The submission path went unaudited for a whole session** while the model
   got five bug fixes worth fractions of a point. The alerting gap above was one
   `grep` away the entire time.
+
+## Process note from 2026-10-18
+
+- **Five PRs each green, the combination red.** #31 added a GitHubRepo test
+  double; #32 added a method the run calls on it. Each PR's CI tested main
+  plus itself and passed; the merge ref after #31 landed failed 5 tests.
+  Caught because #32 was updated from main and CI'd again before merging.
+  When PRs land in sequence, update each from main and re-run CI on the
+  result - or push the full combination as a scratch branch and CI that.
 
 ## Things that will bite you
 
