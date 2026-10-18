@@ -142,7 +142,7 @@ class FPLClient:
         
         Uses PyNaCl for encryption as required by GitHub API.
         """
-        # GH_PAT first, matching token_refresh.py and the workflow env blocks.
+        # GH_PAT first, matching the workflow env blocks.
         # Reading only GITHUB_TOKEN meant this never found a token in the
         # weekly run: PingOne rotates the refresh token on use, so the run
         # consumed the old one, failed to persist the new one, and every later
