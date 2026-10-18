@@ -100,7 +100,14 @@ BONUS_POSITION_MULTIPLIER = {1: 0.96, 2: 0.87, 3: 0.69, 4: 1.31}
 # effectively winner-take-all, so probability concentrates hard on the first
 # choice; outfield places are genuinely rotated, so the contest is softer.
 GK_COMPETITION_ALPHA = 3.0
-OUTFIELD_COMPETITION_ALPHA = 1.5
+# 1.25, from 1.5, on 18 Oct 2026 under rules committed before the run
+# (measure_phase_c.py). Next-gameweek R2 is higher in all five replayable
+# seasons, +0.0025 a gameweek at season-clustered t=4.04 (p=0.016 against a
+# Bonferroni 0.0167), and MAE improves too; the decision-replay harness sees
+# no harm (-13 pts/season, CI spanning zero). 1.0 - which an earlier pooled
+# t=7.9 favoured - wins only 3 of 5 seasons once clustered, and the harness
+# puts it at -58 pts/season. GW8 decisions were identical under either value.
+OUTFIELD_COMPETITION_ALPHA = 1.25
 
 STARTER_MINUTES = 82.0      # mean minutes for a player who starts
 SUB_MINUTES = 18.0          # mean minutes for a player who comes off the bench

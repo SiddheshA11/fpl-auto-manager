@@ -229,6 +229,34 @@ binding constraint is G=5 seasons: inference is t4, and one season carries
 and was rejected by the pre-registered 25% rule; the outcome is plain window
 points. L=6 and L=12 give the same MDE per gameweek (1.9-2.0 pts/GW).
 
+**Phase C, 18 Oct - run under `measure_phase_c.py`, rules committed first.**
+Option 2 below was taken: the harness as a veto, accuracy for what accuracy
+can see.
+
+```
+  accuracy vs alpha 1.5, GW10-38, 5 seasons, season-clustered t4
+  alpha   R2/GW    t      p     GW ahead  seasons  naive t   harness pts/season
+  0.75   -0.0037  -0.98  0.38    60/145     2/5     -2.9       -43 [ns]
+  1.0    +0.0034  +1.78  0.15   105/145     3/5     +5.2       -58 [p~0.05, VETO]
+  1.25   +0.0025  +4.04  0.016  121/145     5/5    +10.0       -13 [ns]
+```
+
+- **`OUTFIELD_COMPETITION_ALPHA` is now 1.25.** The only value passing all
+  four rules: better R2 in every season, MAE better, no harness harm. GW8's
+  transfers, XI, captain and vice are identical under 1.25 and 1.5.
+- **"alpha 1.0 at t=7.9" did not survive.** That was a naive pooled t over
+  gameweeks; clustered by season 1.0 wins 3 of 5 (p=0.15) and the harness
+  puts it at -58 pts/season.
+- **Every optimiser constant stays.** FREE_TRANSFER_VALUE 0.0/0.6,
+  DEFAULT_BENCH_WEIGHT 0.05/0.3, HORIZON 3/4/6/7: none better; every point
+  estimate but bench 0.05 (+4, ns) is negative. Measured within ~90 points,
+  not measured to be zero.
+- **The template tilt at 0.2 scores ~+62 pts/season against no tilt in
+  replay** (CI +15 to +109, p=0.022, uncorrected). Probably not transferable:
+  the replay model is blind to injury flags (`build_state` sets every player
+  fit) and ownership carries exactly that information. No change; the field
+  tilt and the rank purpose remain unmeasurable.
+
 So the harness can veto a change that costs ~90+ points a season and cannot
 resolve anything smaller. The alpha 1.0 point estimate from the old harness
 (-40/season) is inside its noise. **Do not run Phase C on it as if it could
@@ -401,6 +429,8 @@ old band. Commit `measure_deadline_coverage.py` and state the honest range.
 
 - Do not retune `OUTFIELD_COMPETITION_ALPHA`, `FIELD_OWNERSHIP_WEIGHT`,
   `FREE_TRANSFER_VALUE`, `DEFAULT_BENCH_WEIGHT` or `HORIZON` before item 1.
+  (18 Oct: item 1 is built; alpha moved to 1.25 under pre-registered rules and
+  the rest stayed. Re-measure through `measure_phase_c.py`, not by hand.)
   Every one of them was set by argument, and the harness that would settle them
   cannot currently resolve a 100-point effect.
 - Do not derive a leak figure without the field distribution beside it. That
