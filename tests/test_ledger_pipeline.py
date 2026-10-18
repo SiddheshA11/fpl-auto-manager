@@ -28,6 +28,9 @@ class _RecordingRepo:
     def get_variable(self, name):
         return None
 
+    def read_variable(self, name):
+        return True, None
+
     def set_variable(self, name, value):
         return True
 
