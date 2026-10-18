@@ -182,6 +182,70 @@ inline - two of the audit's own claims did not survive measurement.
 
 ### 1. The decision-replay harness has no power. Fix this first.
 
+**18 Oct: built and measured (#37, #38, follow-up). It has more power than
+`simulate.py`, and still not enough for the open questions. Phase C stays
+blocked on a decision.**
+
+`replay_harness.py` forks every arm from the production trajectory's exact
+state at every start gameweek: 144 windows of 8 gameweeks over the five
+replayable seasons (2021-22 to 2025-26; earlier seasons lack the `team`
+column the prior build needs, so the plan's "seven seasons" was wrong).
+`replay_stats.py` holds the analysis rules, committed before any candidate's
+points were read. What is validated, each against something independent:
+
+- `pick_xi` scores 514 real 2026-27 gameweeks (mine and rivals', anonymised)
+  exactly as FPL did, substitutions included - after undoing FPL's picks
+  endpoint, which returns lineups *post*-autosub. Found on the way: the
+  armband went to the best starter after autosubs; fixed (2 of 185 replayed
+  gameweeks change, -24 points total).
+- Template ownership is reconstructed exactly from `selected` (sum / 15 =
+  squads) and matches FPL's own `selected_by_percent` to 0.03-0.05pp mean,
+  so the baseline replays production's 0.2 tilt. Field ownership and the
+  captain tilt cannot be replayed: no historical rival data.
+- Determinism: an identity arm and alpha +/- 1e-6 give exactly 0 in all 432
+  windows. Those make no decision flip, so they are not noise placebos. The
+  placebo is a seed pair of N(0, 0.3) xP noise - expected difference exactly
+  zero, and it flips decisions as often as alpha 1.0 does (alpha 1.0 changes
+  decisions in 6.7 of 8 gameweeks of 98.6% of windows; it is not a near-tie
+  nudge).
+- The SE is season-clustered (t4). The proposed within-season block
+  bootstrap measured 0.21-0.66 of the true SE on synthetic windows and was
+  dropped before use.
+
+**The result, measured by injecting known effects into 20 null replicates:**
+
+```
+  effect      per season   power
+  1.0 pts/GW       38       20%
+  1.5 pts/GW       57       55%
+  2.0 pts/GW       76       70%
+  2.5 pts/GW       95       85%
+```
+
+80% power is ~85-90 points a season, against ~135 for four full seasons. The
+144 windows are worth ~33 independent ones (design effect 4.4), and the
+binding constraint is G=5 seasons: inference is t4, and one season carries
+60% of the variance on average. Terminal valuation inflated placebo SD by 29%
+and was rejected by the pre-registered 25% rule; the outcome is plain window
+points. L=6 and L=12 give the same MDE per gameweek (1.9-2.0 pts/GW).
+
+So the harness can veto a change that costs ~90+ points a season and cannot
+resolve anything smaller. The alpha 1.0 point estimate from the old harness
+(-40/season) is inside its noise. **Do not run Phase C on it as if it could
+settle the constants.** Options, which are a decision, not a default:
+
+1. Make 2016-17 to 2019-20 replayable by reconstructing `team` per
+   player-gameweek (and teams/fixtures for 2016-18). Projected ~50 pts/season
+   MDE with nine seasons. Pre-2019 has no xG, so those priors are weaker.
+2. Accept the harness as a veto for large harms only, and let accuracy
+   (which does have power: alpha 1.0 t=7.9 over 50/58 gameweeks) decide
+   anything the decision side cannot see.
+3. Variance reduction with the model's own xP as a control variate. Cheap,
+   but biased for any change to the model itself (alpha), so only valid for
+   optimiser-only constants.
+
+Original note:
+
 `simulate.py` is the only honest judge of an optimiser change, and as used it
 cannot resolve anything:
 
