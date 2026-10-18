@@ -16,6 +16,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 import github_api
+import manager
 
 
 class _Api:
@@ -155,3 +156,14 @@ def test_dispatch_sends_ref_and_inputs(api):
     api.on("POST", "/repos/o/r/actions/workflows/weekly_run.yml/dispatches", (204, None))
     assert api.repo.dispatch_workflow("weekly_run.yml", inputs={"dry_run": "false"}) is True
     assert api.requests[0]["json"] == {"ref": "main", "inputs": {"dry_run": "false"}}
+
+
+def test_the_weekly_run_refuses_on_a_marker_github_cannot_serve(api, monkeypatch):
+    """
+    The whole chain on a real socket: three 500s in a row are an unknown
+    marker, not an absent one, so the run must not proceed to submit.
+    """
+    api.on("GET", VAR, (500, {}), (500, {}), (500, {}))
+    monkeypatch.setattr(manager, "_github", lambda: api.repo)
+    assert manager._marker_gameweek(sleep=lambda s: None) is manager.MARKER_UNKNOWN
+    assert len(api.requests) == manager.MARKER_READ_ATTEMPTS
