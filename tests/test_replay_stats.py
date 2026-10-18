@@ -115,3 +115,20 @@ def test_flip_decomposition_separates_how_often_from_how_much():
     assert f["p_flip"] == 0.5 and f["unflipped_all_zero"]
     assert f["mean_given_flip"] == pytest.approx(4.0)
     assert f["abs_step_single_flip"] == pytest.approx(7.0)
+
+
+def test_injected_power_rises_with_the_effect_and_is_nominal_at_zero():
+    rng = np.random.default_rng(5)
+    pairs = [_windows(rng) for _ in range(40)]
+    power = dict(RS.injected_power(pairs, "diff", L=8, deltas=(0.0, 0.5, 3.0)))
+    assert power[0.0] <= 0.15
+    assert power[0.0] <= power[0.5] <= power[3.0]
+    assert power[3.0] > 0.8
+
+
+def test_dominance_is_one_over_g_for_equal_seasons_and_rises_when_one_dominates():
+    even = pd.DataFrame({"season": list("abcde"), "diff": [1.0, -1.0, 1.0, -1.0, 1.0]})
+    lopsided = even.assign(diff=[10.0, -1.0, 1.0, -1.0, 1.0])
+    assert RS.dominance([even], "diff") == pytest.approx(0.2)
+    assert RS.dominance([lopsided], "diff") > 0.9
+
