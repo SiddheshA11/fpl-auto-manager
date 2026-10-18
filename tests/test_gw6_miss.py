@@ -12,10 +12,10 @@ watchdog - 3-hourly, triggering at 4h - arrived at 6.7h out (correctly silent)
 and then 1.6h after the deadline.
 
 Measured cause, not a guess: GitHub throttles this repo's hourly cron to ~5.5
-arrivals a day, median gap 4.24h, max 9.57h. Bootstrapping that distribution
-over all 38 real deadlines, the old band was hit 81.3% of the time and the
-old band plus old watchdog submitted 94.8% of gameweeks. The new settings
-measure 100.0%.
+arrivals a day, median gap 4.25h, max 9.57h. Replaying the real arrival
+stream over all 38 deadlines (measure_deadline_coverage.py), the old band was
+hit 69.8% of the time and the old band plus old watchdog submitted 83.2% of
+gameweeks; the new band alone is hit 98.9%. Conditional on the cron firing.
 """
 from __future__ import annotations
 

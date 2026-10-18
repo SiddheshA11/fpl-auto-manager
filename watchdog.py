@@ -60,12 +60,21 @@ WORKFLOW_TO_TRIGGER = "weekly_run.yml"
 # A backstop that is scheduled more sparsely than the gap it is covering is
 # not a backstop.
 #
-# 6.0 with an hourly cron closes it. Bootstrapping both arrival streams over
-# all 38 deadlines, P(gameweek submitted) goes from 94.8% to 100.0%:
+# 6.0 with an hourly cron closes it. Replaying both real arrival streams on
+# the same days (they ride one scheduler and are correlated, so they cannot be
+# resampled separately), `measure_deadline_coverage.py` gives P(gameweek
+# submitted):
 #
-#     band [2.0,6.0) + watchdog 3-hourly @4h      94.8%   <- lost GW6
-#     band [0.5,8.0) + watchdog 3-hourly @4h      99.9%
-#     band [0.5,8.0) + watchdog hourly    @6h    100.0%
+#     band [2.0,6.0) + watchdog 3-hourly @4h      83.2%   <- lost GW6
+#     band [0.5,8.0) + watchdog 3-hourly @4h      99.5%
+#     band [0.5,8.0) + watchdog hourly    @6h    100.0%   (5.7 days observed)
+#
+# The last row rests on under a week of the hourly watchdog; the weekly run's
+# own 98.9% is the floor that is actually well measured. The 94.8 / 99.9 /
+# 100.0% previously here came from independent gap resampling, which ignores
+# that deadlines fall at hours when GitHub's arrivals are thin, and resampled
+# the two streams as if they were independent. All of it is conditional on the cron firing at all - an Actions
+# outage takes out both streams together.
 #
 # Triggering at 6h while the run's own band reaches 8h can mean the watchdog
 # acts first. That is deliberate and safe: its dispatch sets the marker, and

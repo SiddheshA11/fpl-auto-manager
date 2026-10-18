@@ -39,13 +39,22 @@ REQUEST_TIMEOUT = 30
 # was 3.6 MINUTES short of the old 2.0h floor, so it skipped, and the deadline
 # passed with no submission at all.
 #
-# Bootstrapping the observed gap distribution over all 38 real deadlines:
+# `measure_deadline_coverage.py` replays the real arrival stream at each of
+# the 38 deadlines' time of day, on every day it was observed (44 days):
 #
-#     band          P(a tick lands in it)
-#     [2.0, 6.0)          81.3%     <- what lost GW6
-#     [0.5, 6.0)          94.5%
-#     [0.5, 8.0)          99.8%
-#     [0.25, 12.0)       100.0%
+#     band          P(a tick lands in it)   worst single GW
+#     [2.0, 6.0)      69.8-80.8%                60.5%     <- what lost GW6
+#     [0.5, 6.0)      91.0-94.4%                86.0%
+#     [0.5, 8.0)      98.9-99.5%                97.7%
+#     [0.25, 12.0)       100.0%                100.0%
+#
+# The low end is the replay at real deadline times; the high end ignores time
+# of day. These replaced 81.3 / 94.5 / 99.8% from i.i.d. gap resampling, which
+# matches the high end: the correction is entirely time of day (deadlines
+# cluster at 12:30-13:30 and 17:30-18:30 UTC, where arrivals are thin), not gap
+# autocorrelation, which is measured and makes no difference. Whether the
+# time-of-day pattern lasts beyond 44 days is unknown, hence the range. All of
+# it is conditional on the cron firing at all.
 #
 # MIN is 0.5 rather than 2.0 because the old floor protected nothing. FPL
 # accepts changes until the deadline itself; half an hour is ample for a run
@@ -54,8 +63,8 @@ REQUEST_TIMEOUT = 30
 #
 # MAX stays as tight as coverage allows, because the FIRST qualifying tick is
 # the one that acts - so a wide upper bound means deciding on stale team news.
-# At 8.0h the acting lead is bounded by 8h; widening to 24h would buy nothing
-# (coverage is already 99.8%) and would cost a day of freshness.
+# At 8.0h the acting lead is bounded by 8h; widening to 24h would buy at most
+# the last 1.1% and would cost a day of freshness.
 DEADLINE_WINDOW_MIN = 0.5    # a submission still lands comfortably
 DEADLINE_WINDOW_MAX = 8.0
 
