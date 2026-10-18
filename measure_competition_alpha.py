@@ -29,7 +29,9 @@ logging.disable(logging.INFO)
 
 SEASONS = ["2022-23", "2023-24", "2024-25", "2025-26"]
 ALPHAS = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0]
-PRODUCTION = 1.5
+# Read, not restated: every sweep restores this afterwards, and a literal here
+# would silently reset production to a stale value.
+PRODUCTION = X.OUTFIELD_COMPETITION_ALPHA
 
 
 def accuracy_by_alpha(seasons=SEASONS, alphas=ALPHAS) -> pd.DataFrame:
