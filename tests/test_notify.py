@@ -140,20 +140,34 @@ def test_the_watchdog_import_graph_needs_nothing_outside_the_standard_library():
     import sys
 
     repo = pathlib.Path(notify.__file__).parent
-    local = {"deadline_state", "notify", "github_api", "watchdog", "config"}
+    # Walked transitively from the watchdog's entry point. This used to scan
+    # four named files and whitelist `config` unread: had anything in the graph
+    # grown `import config`, and config a third-party import, it would have
+    # passed while the watchdog died of exactly the outage it exists to report.
+    local = {p.stem for p in repo.glob("*.py")}
     offenders = {}
+    seen: set[str] = set()
+    queue = ["watchdog"]
 
-    for name in ("watchdog.py", "notify.py", "deadline_state.py", "github_api.py"):
+    while queue:
+        name = queue.pop()
+        if name in seen:
+            continue
+        seen.add(name)
         imported = set()
-        for node in ast.walk(ast.parse((repo / name).read_text())):
+        for node in ast.walk(ast.parse((repo / f"{name}.py").read_text())):
             if isinstance(node, ast.Import):
                 imported.update(a.name.split(".")[0] for a in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
                 imported.add(node.module.split(".")[0])
+        queue.extend(imported & local)
         third_party = imported - set(sys.stdlib_module_names) - local
         if third_party:
-            offenders[name] = sorted(third_party)
+            offenders[f"{name}.py"] = sorted(third_party)
 
+    # Guards the walk itself: a graph that stopped at the entry point would
+    # pass by scanning nothing.
+    assert {"watchdog", "notify", "deadline_state", "github_api"} <= seen, seen
     assert not offenders, (
         f"the watchdog reaches third-party imports {offenders}, which its "
         "workflow does not install; it will die of ModuleNotFoundError on the "

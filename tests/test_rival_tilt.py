@@ -232,3 +232,72 @@ def test_the_field_weight_is_still_overridable():
     import config as c
     importlib.reload(c)
     assert isinstance(c.FIELD_OWNERSHIP_WEIGHT, float)
+
+
+def test_a_tilt_that_clips_every_captain_falls_back_to_expected_points(caplog):
+    """
+    The clip bites at weight 1/(1 - 2c): 1.25 when the field captains everyone
+    at 10%. With every candidate scored zero the solver's captain was
+    arbitrary - measured, it handed the armband to a goalkeeper.
+    """
+    pool = _pool()
+    pool["field_captaincy"] = 10.0
+    sol = O.SquadOptimizer(pool, value_col="xp", captain_col="xp",
+                           captain_ownership_weight=1.3).build_squad(1000.0)
+    xi = sol.xi.set_index("id")["xp"]
+    assert xi[sol.captain] == xi.max(), "the captain must be the best starter when the tilt says nothing"
+    assert xi[sol.vice_captain] == xi.drop(sol.captain).max()
+    assert any("clips every captain candidate" in r.getMessage() for r in caplog.records)
+
+
+def test_the_vice_captain_is_chosen_on_the_same_tilted_score_as_the_captain():
+    """
+    It sorted raw captain_col, so the vice ignored the captain tilt entirely.
+    A is the best raw scorer and uncaptained; B and C are heavily captained.
+    Tilted, B takes the armband and C - not A - is the better vice.
+    """
+    pool = _pool()
+    mids = pool.index[pool["position"] == 3]
+    a, b, c = mids[0], mids[1], mids[2]
+    pool.loc[[a, b, c], "xp"] = [10.0, 9.9, 9.0]
+    pool.loc[[a, b, c], "cost"] = 4.5
+    pool.loc[[a, b, c], "team"] = [0, 1, 2]
+    pool.loc[b, "field_captaincy"] = 80.0
+    pool.loc[c, "field_captaincy"] = 60.0
+
+    sol = O.SquadOptimizer(pool, value_col="xp", captain_col="xp",
+                           captain_ownership_weight=0.3).build_squad(1000.0)
+    ids = pool["id"]
+    assert sol.captain == ids[b]
+    assert sol.vice_captain == ids[c], "the vice was picked on untilted xP"
+
+
+def test_an_untilted_vice_is_still_the_best_remaining_starter():
+    sol = O.SquadOptimizer(_pool(), value_col="xp", captain_col="xp").build_squad(1000.0)
+    xi = sol.xi.set_index("id")["xp"]
+    assert xi[sol.captain] == xi.max()
+    assert xi[sol.vice_captain] == xi.drop(sol.captain).max()
+
+
+def test_the_captain_is_settled_after_the_solve_not_trusted_to_the_gap():
+    """
+    HiGHS stops at a 1e-4 relative gap, far coarser than the clipped-captain
+    tie-break, so a correct XI can come back with the wrong armband. Given the
+    XI the best captain is a lookup; hand _build_solution a solve that put it
+    on the worst starter and check it is corrected.
+    """
+    from types import SimpleNamespace
+
+    pool = _pool()
+    pool["field_captaincy"] = 10.0
+    opt = O.SquadOptimizer(pool, value_col="xp", captain_col="xp", captain_ownership_weight=1.3)
+    good = opt.build_squad(1000.0)
+    n = opt.n
+    x = opt.players["id"].isin(good.squad["id"]).to_numpy(float)
+    y = opt.players["id"].isin(good.xi["id"]).to_numpy(float)
+    worst = good.xi.sort_values("xp").iloc[0]["id"]
+    c = (opt.players["id"] == worst).to_numpy(float)
+    res = SimpleNamespace(x=np.concatenate([x, y, c]), fun=-1.0, message="gap reached")
+
+    sol = opt._build_solution(res, 1000.0)
+    assert sol.captain == good.captain != worst
