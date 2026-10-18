@@ -42,15 +42,21 @@ def test_the_harness_scores_exactly_as_simulate_does(data):
     assert sorted(order) == sorted(scored["id"])
 
 
+@pytest.fixture(scope="module")
+def scored_gw12(data):
+    """One scoring at the cache horizon, shared: each costs ~6s."""
+    return R.score_with_order(data, 12, R.SCORE_HORIZON)
+
+
 @pytest.mark.parametrize("horizon", [3, 5, 7])
-def test_a_derived_horizon_is_bit_identical_to_scoring_at_it(data, horizon):
+def test_a_derived_horizon_is_bit_identical_to_scoring_at_it(data, scored_gw12, horizon):
     """
     Including row order: the model's sort is not stable and row order reaches
     the solver. An id-sorted reconstruction got the order wrong on every
     gameweek tried.
     """
     gw = 12
-    scored, order = R.score_with_order(data, gw, R.SCORE_HORIZON)
+    scored, order = scored_gw12
     derived = R.derive_horizon(scored, order, gw, horizon)
     direct = S.score_gameweek(data, gw, horizon)
     assert list(derived["id"]) == list(direct["id"])
@@ -60,8 +66,8 @@ def test_a_derived_horizon_is_bit_identical_to_scoring_at_it(data, horizon):
                           equal_nan=True)
 
 
-def test_a_horizon_beyond_the_cache_is_refused(data):
-    scored, order = R.score_with_order(data, 12, R.SCORE_HORIZON)
+def test_a_horizon_beyond_the_cache_is_refused(scored_gw12):
+    scored, order = scored_gw12
     with pytest.raises(ValueError):
         R.derive_horizon(scored, order, 12, R.SCORE_HORIZON + 1)
 
@@ -92,7 +98,9 @@ def test_an_arm_key_identifies_the_config_not_the_name():
 def short_run(tmp_path_factory, data):
     """
     A real run on GW2-9 of one season, in-process, into a throwaway cache:
-    the identity arm, alpha +/- 1e-6, and two placebo seeds.
+    the identity arm, alpha + 1e-6, and one placebo arm to drive the noise
+    path end to end. The placebo's reproducibility has its own test; alpha
+    - 1e-6 is the full harness's null, not repeated here (CI time).
     """
     mp = pytest.MonkeyPatch()
     mp.setattr(R, "CACHE_DIR", tmp_path_factory.mktemp("replay_cache"))
@@ -100,7 +108,7 @@ def short_run(tmp_path_factory, data):
     R._arm_frame.cache_clear()
     try:
         arms = [R.parse_arm(a) for a in
-                ("same", "alpha+1e-6", "alpha-1e-6", "noise=0.05@1", "noise=0.05@2")]
+                ("same", "alpha+1e-6", "noise=0.05@1")]
         df = R.run(arms, [SEASON], L=3, T=2, workers=1)
     finally:
         R._arm_frame.cache_clear()
@@ -114,7 +122,7 @@ def test_every_arm_gets_every_window(short_run):
     assert set(short_run.groupby("arm").size()) == {5}
 
 
-@pytest.mark.parametrize("arm", ["same", "alpha+1e-6", "alpha-1e-6"])
+@pytest.mark.parametrize("arm", ["same", "alpha+1e-6"])
 def test_a_null_arm_reproduces_the_baseline_in_every_window(short_run, arm):
     g = short_run[short_run["arm"] == arm]
     assert (g["diff"] == 0).all() and (g["diff_terminal"] == 0).all()
