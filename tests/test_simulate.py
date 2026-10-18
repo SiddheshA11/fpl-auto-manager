@@ -10,6 +10,7 @@ accrues.
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -218,3 +219,34 @@ def test_a_state_copy_carries_every_field_and_shares_nothing():
         assert getattr(clone, f.name) == getattr(state, f.name), f.name
         if isinstance(getattr(state, f.name), (list, dict)):
             assert getattr(clone, f.name) is not getattr(state, f.name), f"{f.name} is shared"
+
+
+# ---------------------------------------------------------------- ownership
+
+def test_template_ownership_reproduces_fpls_published_figure(season_data):
+    data = season_data
+    """
+    Checked against FPL's own selected_by_percent in players_raw - an
+    independent field, not this code's arithmetic. players_raw is an
+    end-of-season snapshot, so the comparison is at the last gameweek.
+    """
+    last = int(data.gw_df["GW"].max())
+    ours = S.template_ownership(data.gw_df, last)
+    fpl = data.raw_df.set_index("id")["selected_by_percent"].astype(float)
+    common = [i for i in ours if i in fpl.index]
+    assert len(common) > 500
+    diff = np.abs([ours[i] - fpl[i] for i in common])
+    assert diff.max() < 1.5
+    assert diff.mean() < 0.1
+
+
+def test_managers_are_not_squad_players():
+    """2024-25 listed managers as elements; they are outside the fifteen."""
+    gw = pd.DataFrame({"GW": [1] * 4, "element": [1, 2, 3, 4],
+                       "position": ["MID", "DEF", "FWD", "AM"],
+                       "selected": [150, 150, 150, 9000]})
+    own = S.template_ownership(gw, 1)
+    assert 4 not in own
+    # 450 selections across fifteen-player squads is 30 squads; 150 of 30 is 500%,
+    # which a real gameweek never produces, but the arithmetic is the point.
+    assert own[1] == pytest.approx(150 / 30 * 100)
