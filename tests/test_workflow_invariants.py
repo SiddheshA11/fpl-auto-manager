@@ -48,9 +48,14 @@ def test_the_gate_cannot_silently_cancel_the_weekly_run():
     start = body.index("manage-team:")
     cond = body[start:body.index("steps:", start)]
 
-    assert "always()" in cond, (
-        "without always(), a failed gate skips manage-team before the `if` is "
-        "evaluated, and the deadline passes with no run at all"
+    assert "!cancelled()" in cond, (
+        "without a status function, a failed gate skips manage-team before the "
+        "`if` is evaluated, and the deadline passes with no run at all"
+    )
+    assert "always()" not in cond, (
+        "always() also runs after a cancellation, so `gh run cancel` cannot stop "
+        "a run that is about to submit; !cancelled() keeps fail-open on a gate "
+        "failure and restores cancellability"
     )
     assert "!= 'false'" in cond, (
         "the condition must run unless the gate said 'false' explicitly; "
