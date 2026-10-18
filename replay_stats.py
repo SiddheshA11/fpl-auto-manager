@@ -62,7 +62,8 @@ PRE-REGISTERED RULES
      the single-flip step size - never as one season total.
 
     python3 replay_stats.py placebo  data/replay/placebo_*.csv
-    python3 replay_stats.py arm      data/replay/<arm>.csv
+    python3 replay_stats.py power    data/replay/placebo_e0.3_L8.csv
+    python3 replay_stats.py arm      data/replay/<arm>.csv --outcome diff
 """
 from __future__ import annotations
 
@@ -195,6 +196,57 @@ def report_placebo(paths: list[str]) -> int:
     return 0
 
 
+def injected_power(pairs: list[pd.DataFrame], col: str, L: int,
+                   deltas=(0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0)) -> list[tuple[float, float]]:
+    """
+    Power measured, not assumed: add a known effect of delta points per
+    decision-gameweek to every window of every null replicate and count how
+    often the test rejects. The analytic MDE leans on the t4 reference, and
+    the placebo shows that reference does not hold here - one season
+    dominates - so this is the figure to trust.
+
+    A constant additive effect is the friendliest case. A real change acts
+    through decision flips and adds its own variance, so treat this as a
+    floor on the MDE, not an estimate of it.
+    """
+    out = []
+    for delta in deltas:
+        hits = [test_stat(d.assign(**{col: d[col] + delta * L}), col)[2] < 0.05 for d in pairs]
+        out.append((delta, float(np.mean(hits))))
+    return out
+
+
+def dominance(pairs: list[pd.DataFrame], col: str) -> float:
+    """Mean share of the largest season in the squared cluster sums; 1/G if equal."""
+    shares = []
+    for d in pairs:
+        c = d.groupby("season")[col].sum().to_numpy()
+        shares.append(float((c ** 2).max() / (c ** 2).sum()))
+    return float(np.mean(shares))
+
+
+def report_power(path: str) -> int:
+    df = pd.read_csv(path)
+    L = int(df["L"].iloc[0])
+    pairs = placebo_pairs(df)
+    col, _ = choose_outcome(pairs)
+    allp = pd.concat(pairs)
+    n_seasons = allp["season"].nunique()
+    iid_se = allp[col].std(ddof=1) / np.sqrt(len(pairs[0]))
+    se = float(np.median([test_stat(d, col)[1] for d in pairs]))
+    print(f"{len(pairs)} null replicates x {len(pairs[0])} windows, L={L}, outcome {col}\n")
+    print(f"  window SD {allp[col].std(ddof=1):.1f}; per-season SD "
+          + ", ".join(f"{s} {v:.1f}" for s, v in allp.groupby("season")[col].std(ddof=1).items()))
+    print(f"  design effect {(se / iid_se) ** 2:.1f} -> effectively "
+          f"{len(pairs[0]) / (se / iid_se) ** 2:.0f} independent windows")
+    print(f"  largest season's share of the squared cluster sums: {dominance(pairs, col):.2f}"
+          f" (equal seasons: {1 / n_seasons:.2f})\n")
+    print(f"  {'effect':>14}{'per season':>12}{'power':>8}")
+    for delta, p in injected_power(pairs, col, L):
+        print(f"  {delta:>8.1f} pts/GW{delta * GW_PER_SEASON:>12.0f}{p:>8.0%}")
+    return 0
+
+
 def report_arm(path: str, col: str) -> int:
     df = pd.read_csv(path)
     L = int(df["L"].iloc[0])
@@ -218,6 +270,8 @@ def main() -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("placebo")
     p.add_argument("paths", nargs="+")
+    w = sub.add_parser("power")
+    w.add_argument("path")
     a = sub.add_parser("arm")
     a.add_argument("path")
     a.add_argument("--outcome", choices=["diff", "diff_terminal"], required=True,
@@ -225,6 +279,8 @@ def main() -> int:
     args = ap.parse_args()
     if args.cmd == "placebo":
         return report_placebo(args.paths)
+    if args.cmd == "power":
+        return report_power(args.path)
     return report_arm(args.path, args.outcome)
 
 
