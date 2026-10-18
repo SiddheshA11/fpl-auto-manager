@@ -107,6 +107,37 @@ def test_a_record_is_json_serialisable(plan_and_scored):
     json.dumps(_rec(plan, scored))
 
 
+def test_the_pool_covers_every_scored_player_not_only_the_squad(plan_and_scored):
+    """
+    The fifteen are selected on xP, so their correlation with outcomes is range
+    restricted by construction. Testing whether that explains in-season
+    r=0.251 needs the population the selection was made from.
+    """
+    plan, scored = plan_and_scored
+    extra = pd.DataFrame({"id": [99], "position": [3], "cost": [4.5], "xp_next": [0.02],
+                          "p_start": [0.01], "availability": [1.0], "exp_minutes": [0.5]})
+    scored = pd.concat([scored, extra], ignore_index=True)
+    r = _rec(plan, scored)
+
+    assert r["pool"]["id"] == [1, 2, 3, 4, 99]
+    assert 99 not in {p["id"] for p in r["players"]}, "the unchosen player is pool-only"
+    i = r["pool"]["id"].index(99)
+    assert r["pool"]["xp_next"][i] == pytest.approx(0.02)
+    assert r["pool"]["position"][i] == 3 and isinstance(r["pool"]["position"][i], int)
+    for col in ledger.POOL_COLUMNS:
+        assert len(r["pool"][col]) == len(r["pool"]["id"]), col
+
+
+def test_a_missing_prediction_is_null_not_a_bare_nan(plan_and_scored):
+    """json.dumps writes NaN, which is not JSON; a strict reader rejects the file."""
+    plan, scored = plan_and_scored
+    scored = scored.copy()
+    scored.loc[scored["id"] == 4, "p_start"] = float("nan")
+    r = _rec(plan, scored)
+    assert r["pool"]["p_start"][r["pool"]["id"].index(4)] is None
+    json.dumps(r["pool"], allow_nan=False)
+
+
 # ------------------------------------------------------ it may never fail a run
 
 class _FakeRepo:
