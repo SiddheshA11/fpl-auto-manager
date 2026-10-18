@@ -32,7 +32,17 @@ logger = logging.getLogger("fpl_auto")
 
 LEDGER_BRANCH = "predictions"
 LEDGER_DIR = "predictions"
-SCHEMA_VERSION = 1
+# 2 added `pool`: the model's prediction for every scored player, not only the
+# fifteen it chose. Additive, so a reader of schema 1 still works on 2.
+SCHEMA_VERSION = 2
+
+# Every scored player, as parallel columns keyed by `id`. The fifteen chosen
+# players are a sample selected on xP, so their in-season r cannot tell range
+# restriction from a model that has degraded; that needs the population the
+# selection was made from. A top-100 cut would not do: on the pre-season
+# snapshot it keeps an xP sd of 0.55 against 1.20 for the pool, and drops the
+# near-zero players who are the other half of the gap. The whole pool is ~17KB.
+POOL_COLUMNS = ("position", "xp_next", "p_start", "exp_minutes", "availability")
 
 
 def build_record(*, event_id: int, plan, scored, captain: int, vice: int,
@@ -42,9 +52,9 @@ def build_record(*, event_id: int, plan, scored, captain: int, vice: int,
     """
     The record, as pure data so it can be tested without a network or a model.
 
-    `scored` is the frame the optimiser ran on; only the squad's rows are kept,
-    because the point is to audit the decision, not to archive 600 players a
-    week.
+    `scored` is the frame the optimiser ran on. `players` carries the squad's
+    rows in full, to audit the decision; `pool` carries a few columns for every
+    scored player, to calibrate the model on a population it did not select.
     """
     now = now or datetime.now(timezone.utc)
     ids = [int(i) for i in plan.squad["id"]]
@@ -90,7 +100,28 @@ def build_record(*, event_id: int, plan, scored, captain: int, vice: int,
         "tilt_source": tilt_source,
         "xi_xp": float(plan.xi["xp_next"].sum()) if "xp_next" in plan.xi.columns else None,
         "players": players,
+        "pool": _pool(scored),
     }
+
+
+def _pool(scored) -> dict:
+    """
+    Columnar, sorted by id. NaN becomes null, because json.dumps would
+    otherwise write a bare NaN that strict JSON readers reject.
+    """
+    import math
+
+    frame = scored.sort_values("id")
+    out: dict = {"id": [int(i) for i in frame["id"]]}
+    for col in POOL_COLUMNS:
+        if col not in frame.columns:
+            continue
+        if col == "position":
+            out[col] = [int(v) for v in frame[col]]
+            continue
+        out[col] = [None if v is None or math.isnan(float(v)) else round(float(v), 4)
+                    for v in frame[col]]
+    return out
 
 
 def record_submission(gh, **kwargs) -> bool:
