@@ -549,7 +549,7 @@ def run_weekly_cycle(dry_run: bool = False, respect_window: bool = False, max_hi
                     captain=plan.captain, vice=plan.vice_captain,
                     chip=decision.chip,
                     transfers_in=plan.transfers_in, transfers_out=plan.transfers_out,
-                    hits=plan.hits,
+                    hits=plan.hits, tilt_source=tilt.source,
                 )
             except Exception as e:  # noqa: BLE001
                 logger.warning("prediction ledger failed (%s: %s); the team is submitted",
