@@ -1379,7 +1379,11 @@ class XPModel:
         out["selected_by_percent"] = df["selected_by_percent"]
         out["status"] = df["status"]
 
-        mm = self.minutes_model()
+        # For the gameweek xp_next describes. minutes_model() with no event
+        # returns the base status flag and skips dated news, doubt decay and
+        # card risk, so a player the model scored at 0.0 xP was reported - and
+        # recorded in the ledger - as 75% available and playing 59 minutes.
+        mm = self.minutes_model(events[0]) if events else self.minutes_model()
         out["exp_minutes"] = mm["exp_minutes"]
         out["availability"] = mm["availability"]
         out["p_start"] = mm["p_start"]

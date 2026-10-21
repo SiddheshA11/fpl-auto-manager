@@ -883,7 +883,15 @@ to price a tail.
 
 ## Audit findings, not yet fixed
 
-### The preview tools read a DIFFERENT availability than the model scores with
+### The preview tools read a DIFFERENT availability than the model scores with - FIXED 21 Oct
+
+The columns are now built for the gameweek `xp_next` describes. It mattered
+more than the note below says: the ledger's new `pool` records exactly these
+columns, so GW8's minutes calibration would have been scored against numbers
+the model never used - a player it priced at 0.0 xP logged as 75% available
+and 59 expected minutes. No decision path reads them (optimiser, chips and
+manager do not), so no squad changes. `tests/test_scored_minutes_columns.py`.
+
 
 `expected_points` builds its output frame with `mm = self.minutes_model()` -
 **no event** (xp_model.py:1103). `_availability(None)` returns the base flag
