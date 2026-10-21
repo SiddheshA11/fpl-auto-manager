@@ -15,17 +15,19 @@ Run with --offline to work from the most recent snapshot instead of the API.
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 
 import pandas as pd
 
+import fpl_client
 import priors
 import rivals
 import xp_model as X
 from fetch_data import LIVE_ENDPOINTS, _get
-from config import FPL_TEAM_ID
+from config import ENDPOINTS, FPL_TEAM_ID
 from optimizer import SquadOptimizer, format_squad
 
 logger = logging.getLogger("fpl_auto.recommend")
@@ -38,13 +40,19 @@ POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 def load_game_state(offline: bool) -> tuple[dict, list[dict]]:
     """Live API by default; most recent snapshot when offline or on failure."""
+    bootstrap, fixtures, _ = _load_game_state(offline)
+    return bootstrap, fixtures
+
+
+def _load_game_state(offline: bool) -> tuple[dict, list[dict], bool]:
+    """As load_game_state, plus whether the data actually came from the live API."""
     if not offline:
         try:
             import json
             bootstrap = json.loads(_get(LIVE_ENDPOINTS["bootstrap-static"]))
             fixtures = json.loads(_get(LIVE_ENDPOINTS["fixtures"]))
             logger.info("loaded live FPL data")
-            return bootstrap, fixtures
+            return bootstrap, fixtures, True
         except (RuntimeError, ValueError) as e:
             logger.warning("live fetch failed (%s); falling back to snapshot", e)
 
@@ -53,13 +61,46 @@ def load_game_state(offline: bool) -> tuple[dict, list[dict]]:
     if not bs_path or not fx_path:
         raise SystemExit("no snapshot available and live fetch failed; run fetch_data.py")
     logger.info("using snapshot %s", bs_path.name)
-    return X.load_snapshot(bs_path), X.load_snapshot(fx_path)
+    return X.load_snapshot(bs_path), X.load_snapshot(fx_path), False
 
 
-def build_model(bootstrap: dict, fixtures: list[dict], horizon: int) -> pd.DataFrame:
+def load_recent_minutes(bootstrap: dict, live: bool) -> dict[int, list[float]]:
+    """
+    The same recent-minutes lags manager.py hands the model, from the public
+    `event/{gw}/live/` endpoint and through the same parser.
+
+    Never an authenticated FPLClient: the refresh token is single-use and
+    rotates, so a preview that logged in would spend the weekly run's secret.
+    On a snapshot - --offline, or the live fetch already failed - there is
+    nothing to read them from; that degrades to season rates, as manager.py
+    does when the fetch fails, and says so.
+    """
+    if not live:
+        logger.warning("snapshot data: no recent minutes; using season rates alone, "
+                       "so this preview scores on a weaker model than the weekly run")
+        return {}
+
+    def get_live(gw: int) -> dict | None:
+        try:
+            return json.loads(_get(ENDPOINTS["event_live"].format(event_id=gw)))
+        except (RuntimeError, ValueError) as e:
+            logger.warning("GW%d live fetch failed (%s)", gw, e)
+            return None
+
+    events_done = sum(1 for e in bootstrap.get("events", []) if e.get("finished"))
+    try:
+        return fpl_client.recent_minutes_from(get_live, events_done)
+    except Exception as e:                      # noqa: BLE001 - never fatal, as in manager.py
+        logger.warning("could not fetch recent minutes (%s); using season rates alone", e)
+        return {}
+
+
+def build_model(bootstrap: dict, fixtures: list[dict], horizon: int,
+                recent_minutes: dict[int, list[float]] | None = None) -> pd.DataFrame:
     team_codes = {t["code"]: t["name"] for t in bootstrap["teams"]}
     prior_set = priors.build_priors(current_team_codes=team_codes)
-    model = X.XPModel(bootstrap, fixtures, prior_set, X.ModelConfig(horizon=horizon))
+    model = X.XPModel(bootstrap, fixtures, prior_set, X.ModelConfig(horizon=horizon),
+                      recent_minutes=recent_minutes)
     events = X.next_events(bootstrap, horizon)
     if not events:
         raise SystemExit("no upcoming gameweeks found")
@@ -108,8 +149,12 @@ def main() -> int:
     if not args.build and not args.transfer:
         args.build = True
 
-    bootstrap, fixtures = load_game_state(args.offline)
-    scored, events = build_model(bootstrap, fixtures, args.horizon)
+    bootstrap, fixtures, live = _load_game_state(args.offline)
+    # manager.py folds these into the start rate, the largest single accuracy
+    # gain the model has (R2 0.269 -> 0.319). Omitted, this tool previewed a
+    # plan scored on a different model from the one the weekly run submits.
+    recent_minutes = load_recent_minutes(bootstrap, live)
+    scored, events = build_model(bootstrap, fixtures, args.horizon, recent_minutes)
 
     owned = [int(s) for s in args.squad.split(",") if s.strip()] if args.squad else []
     pool = _exclude_unavailable(scored, keep_ids=owned)
