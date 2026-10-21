@@ -132,3 +132,26 @@ def test_the_season_rate_no_longer_hard_caps_at_eight_gameweeks(state):
         w = n / (n + X.START_RATE_EVIDENCE_GAMEWEEKS)
         assert w < 1.0, f"the prior is fully displaced by gameweek {n}"
     assert 8 / (8 + X.START_RATE_EVIDENCE_GAMEWEEKS) < 19 / (19 + X.START_RATE_EVIDENCE_GAMEWEEKS)
+
+
+def test_the_weekly_run_and_the_preview_parse_live_minutes_identically(monkeypatch):
+    """
+    manager.py reaches the parser through FPLClient.get_recent_minutes and
+    recommend.py through fpl_client.recent_minutes_from directly. One parser,
+    pinned here so the client cannot quietly grow a second one. A gameweek that
+    fails to fetch is skipped, never fatal.
+    """
+    import fpl_client
+
+    payloads = {
+        3: {"elements": [{"id": 1, "stats": {"minutes": 90}}, {"id": 2, "stats": {"minutes": 0}}]},
+        2: None,
+        1: {"elements": [{"id": 1, "stats": {"minutes": 45}}, {"id": "bad"}]},
+    }
+    client = fpl_client.FPLClient()
+    monkeypatch.setattr(client, "get_live_event", payloads.get)
+
+    got = client.get_recent_minutes(3)
+    assert got == fpl_client.recent_minutes_from(payloads.get, 3)
+    assert got == {1: [90.0, 45.0], 2: [0.0]}
+    assert client.get_recent_minutes(0) == {}

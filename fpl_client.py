@@ -20,6 +20,36 @@ logger = logging.getLogger("fpl_auto")
 REQUEST_TIMEOUT = 30
 
 
+def recent_minutes_from(get_live, events_done: int, depth: int = 5) -> dict[int, list[float]]:
+    """
+    Parse `event/{gw}/live/` into minutes per player, most recent gameweek first.
+
+    `get_live(gw)` returns the decoded payload or None. Module-level so that
+    recommend.py, which must not construct an authenticated client, builds the
+    same lags as the weekly run from the same parser.
+    """
+    out: dict[int, list[float]] = {}
+    if events_done <= 0:
+        return out
+
+    for gw in range(events_done, max(0, events_done - depth), -1):
+        live = get_live(gw)
+        if not live or "elements" not in live:
+            logger.warning("no live data for GW%d; recent minutes will be shallower", gw)
+            continue
+        for element in live["elements"]:
+            try:
+                pid = int(element["id"])
+                mins = float((element.get("stats") or {}).get("minutes", 0) or 0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            out.setdefault(pid, []).append(mins)
+
+    logger.info("recent minutes: %d players over %d gameweek(s)",
+                len(out), max(len(v) for v in out.values()) if out else 0)
+    return out
+
+
 class FPLClient:
     """Authenticated client for the Fantasy Premier League API."""
 
@@ -471,26 +501,7 @@ class FPLClient:
         window is a slightly worse estimate, while raising here would cost the
         entire run over a stat that is an enhancement.
         """
-        out: dict[int, list[float]] = {}
-        if events_done <= 0:
-            return out
-
-        for gw in range(events_done, max(0, events_done - depth), -1):
-            live = self.get_live_event(gw)
-            if not live or "elements" not in live:
-                logger.warning("no live data for GW%d; recent minutes will be shallower", gw)
-                continue
-            for element in live["elements"]:
-                try:
-                    pid = int(element["id"])
-                    mins = float((element.get("stats") or {}).get("minutes", 0) or 0)
-                except (KeyError, TypeError, ValueError):
-                    continue
-                out.setdefault(pid, []).append(mins)
-
-        logger.info("recent minutes: %d players over %d gameweek(s)",
-                    len(out), max(len(v) for v in out.values()) if out else 0)
-        return out
+        return recent_minutes_from(self.get_live_event, events_done, depth)
 
     def get_chips_status(self, event: int | None = None) -> dict:
         """
