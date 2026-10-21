@@ -1,21 +1,21 @@
 # Handoff — FPL Auto Manager
 
-Updated 2026-10-18. **Deployed**, season in progress, `main` green.
+Updated 2026-10-20. **Deployed**, season in progress, `main` green.
 
 ## State
 
 | | |
 |---|---|
 | team | 5413589 |
-| season to date | **429 pts vs a 386 average (+43)** through GW7. Overall rank 1,849,127. No hits taken all season. |
-| per gameweek | GW1 53 (+3) / GW2 105 (+24) / GW3 49 (-2) / GW4 79 (+10) / GW5 43 (-5) / GW6 69 (+11) / GW7 31 (+2). GW7 still being played at time of writing. |
+| season to date | **469 pts vs a 416 average (+53)** through GW7, final. Overall rank 1,490,787. No hits taken all season. |
+| per gameweek | GW1 53 (+3) / GW2 105 (+24) / GW3 49 (-2) / GW4 79 (+10) / GW5 43 (-5) / GW6 69 (+11) / GW7 71 (+12). |
 | mini leagues | 5 leagues, 94 rivals. Mid-table everywhere. **Read "the decline diagnosis was wrong" below before concluding anything from that** - combined hindsight leak is the 53rd percentile of this field and captaincy the 24th. |
 | deadlines missed | **GW2** (28 Aug, scheduled run never fired) and **GW6** (10 Oct, a run arrived with 1.94h in hand and was rejected by a 2.0h floor, 3.6 minutes short). Both squads rolled over. Nothing missed since the coverage fix, though GW7 did not exercise it - its single qualifying tick would have passed the old band too. |
-| bench points | 61 through GW7, ~8.7/GW. The largest *measured* leak is lineup selection, at the 66th percentile of the field - mildly above average, well inside p90. |
+| bench points | 74 through GW7, ~10.6/GW. Field comparison through GW7 (`measure_field_leaks.py --through 7`, 93 rivals): lineup leak 56 vs field 40.7 (75th pctile, p90 70), captaincy 32 vs 38.5 (33rd - better than the field), combined 69th, points 469 vs 445.5 (68th). About 10 of the lineup leak's GW6-7 rise is GW6, the missed deadline's stale lineup; GW7's 9 is mostly Gomez benched at p_start 0.98 for 8 points. |
 | Weekly Run | cron **`0 * * * *`** (hourly), acting band **0.5-8h** before the deadline: 98.9-99.5% coverage, conditional on the cron firing (`measure_deadline_coverage.py`). `manager.py --respect-window` decides, and the `FPL_LAST_SUBMITTED_GW` marker makes repeats no-ops; an unreadable marker now refuses rather than proceeds. Cancellable with `gh run cancel`. |
 | Deadline alerting | **LIVE.** `watchdog.yml` hourly; Telegram verified end to end 17 Oct. Alerts on an unsubmitted deadline inside 6h (and dispatches a run), a gameweek missed outright, a submitted team whose marker write failed, its own job failing, and an all-clear every 72h so silence means something. |
 | Scheduler | `scheduler.yml`, `token_refresh.yml` and their scripts deleted 18 Oct. `deadline_check.yml` is dispatch-only and unreachable - a real gap, since nothing re-reads availability after Friday press conferences. |
-| Tests | 419 local (2 data-conditional skips), 417 in CI (4), green on main |
+| Tests | 462 in CI (4 data-conditional skips), green on main. CI's two passes take ~20 of the 30-minute limit. |
 | accuracy | MAE 0.979, RMSE 1.976, **R2 0.3093** on GW10-38 of 2025-26, reproducible via `python backtest.py --season 2025-26` |
 
 Benchmark for context: MAE 1.29-1.42, RMSE 2.27-2.38, R2 0.29-0.35 (Valouxis,
