@@ -1205,6 +1205,17 @@ Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
   `deadline_check.py` had the identical bug and carries a comment about it.
   Now fixed, with a test that records the optimiser's constructor kwargs
   through a full `recommend.main()` run.
+- **`recommend.py` drifted from the weekly run a third time, one layer down.**
+  After `ownership_weight` and `horizon_weight`, it also built `XPModel` with
+  no `recent_minutes` - the input behind the largest accuracy gain the model
+  has (R2 0.269 -> 0.319) - so the preview scored on a weaker model than the
+  one submitted. Fixed 21 Oct: it reads the public `event/{gw}/live/` through
+  `fpl_client.recent_minutes_from`, the same parser `get_recent_minutes` uses,
+  and never logs in (the refresh token is single-use). On snapshot data
+  (`--offline`, or a failed live fetch) it logs and runs without them.
+  `tests/test_recommend_recent_minutes.py` records XPModel's kwargs through
+  `recommend.main()`. **Anything new manager.py passes to XPModel or the
+  optimiser must be passed here too.**
 - **A season total is not a measurement.** See "the noise floor" above.
 
 ## Verified API facts
