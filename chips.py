@@ -41,9 +41,10 @@ THRESHOLDS = {
 # end. A chip is a one-shot resource with an expiry, so "is this worth 13
 # points" is the wrong question - the right one is "is this better than the
 # best chance I expect before the window closes". With eighteen gameweeks still
-# to come those chances are plentiful and the bar should be high; on the last
-# gameweek of the window it is play-it-or-lose-it and the base threshold is the
-# whole test.
+# to come those chances are plentiful and the bar should be high. It bottoms
+# out at the base threshold, which is NOT the play-it-or-lose-it test: an
+# expired chip is worth zero, so at the close any positive gain beats holding.
+# That is chips_at_risk_of_expiry's job, not this curve's.
 #
 # This came out of a real GW1 dry run proposing bench boost for 13.3 xP against
 # a flat 12.0 bar - in a gameweek where every player appears exactly once, with
@@ -85,6 +86,36 @@ def effective_threshold(bootstrap: dict, name: str, event: int) -> float:
     span = max(1, stop - start)
     remaining = max(0, stop - event) / span      # 1.0 at the opening, 0.0 at the close
     return base * (1.0 + EARLY_WINDOW_PREMIUM * remaining)
+
+
+# Spare gameweeks left before a window closes when forcing begins. One chip per
+# gameweek means N chips need N slots; one extra absorbs a single missed
+# deadline, which happened twice in the first eight gameweeks of 2026-27.
+END_OF_WINDOW_SLACK = 1
+
+
+def chips_at_risk_of_expiry(bootstrap: dict, available: set[str], event: int) -> set[str]:
+    """
+    Chips that must now be played on any positive gain or be lost.
+
+    The commit bar never falls below its base threshold, and on a half-season
+    with no doubles an ordinary bench never clears bench boost's 12 - so the
+    chip used to lapse at GW19 worth nothing. Once the gameweeks left in a
+    window are no more than its unplayed chips plus END_OF_WINDOW_SLACK, the
+    floor drops to zero for those chips and the planner fits them into the
+    remaining slots by value.
+    """
+    by_stop: dict[int, set[str]] = {}
+    for name in available:
+        w = window_for(bootstrap, name, event)
+        if w:
+            by_stop.setdefault(int(w["stop_event"]), set()).add(name)
+    return {
+        name
+        for stop, names in by_stop.items()
+        if stop - event + 1 <= len(names) + END_OF_WINDOW_SLACK
+        for name in names
+    }
 
 
 @dataclass
@@ -474,9 +505,14 @@ class ChipEngine:
         # valuable chip scheduled elsewhere. Filtering the options first means
         # every assignment the solver can reach is one worth committing to, and
         # it maximises total gain across them.
+        expiring = chips_at_risk_of_expiry(self.bootstrap, avail, event)
+        if expiring:
+            logger.info("chip window closing: %s must be played or lost; any positive gain commits",
+                        ", ".join(sorted(expiring)))
         committable = {
             (chip, gw): gain for (chip, gw), gain in values.items()
             if gain >= effective_threshold(self.bootstrap, chip, gw)
+            or (chip in expiring and gain > 0)
         }
 
         plan = ChipPlan(
