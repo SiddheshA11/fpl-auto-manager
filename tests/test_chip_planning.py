@@ -145,11 +145,16 @@ def test_a_chip_nobody_should_play_is_left_unassigned():
     assert chips.solve_assignment({}, ["bboost", "3xc"], [5, 6]) == {}
 
 
-def test_the_commit_floor_falls_to_nothing_at_the_end_of_the_window():
+def test_the_commit_floor_falls_to_its_base_at_the_end_of_the_window():
     """
     The floor exists because the window runs past the planning horizon and an
-    unseen double beats the best mediocre week in view. On the final gameweek
-    there is no unseen future left, so holding stops being an option.
+    unseen double beats the best mediocre week in view, so it is highest at the
+    opening. It bottoms out at the base threshold, not zero.
+
+    This test was named "falls to nothing" while asserting it fell to 12, and
+    with no rule for expiry the first-half chips would have lapsed at GW19
+    unplayed. Play-it-or-lose-it is chips_at_risk_of_expiry, tested in
+    test_chip_expiry.py.
     """
     bootstrap, *_ = _state()
     early = chips.effective_threshold(bootstrap, "bboost", 1)
