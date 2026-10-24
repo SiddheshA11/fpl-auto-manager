@@ -79,6 +79,8 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Public history endpoint only, for chip status. Not a credential.
+          FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
         run: |
           # The ledger self-test lives here because this job already carries
           # GH_PAT and installs nothing. Dispatch-only; the schedule never
