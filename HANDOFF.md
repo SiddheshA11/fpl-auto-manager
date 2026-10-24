@@ -1225,12 +1225,14 @@ Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
   end of the window" and asserted it fell to 12. `chips_at_risk_of_expiry`
   now drops the floor to zero once the gameweeks left are no more than the
   unplayed chips + 1 (GW15 for four chips); `tests/test_chip_expiry.py`.
-  **Still open, not fixed here:** (a) the decaying bar pushes chips later
-  even onto a *lower*-valued week - GW7 held 3xc for GW16 at +7.6 over +7.7
-  now, since GW7's bar was 8.4 and GW16's 6.6; (b) manager.py passes no
-  `best_xi_xp` / `wildcard_gain_by_gw`, so free hit and wildcard are only ever
-  valued for the current gameweek and can never be scheduled ahead. The
-  weights behind all of it (`THRESHOLDS`, `EARLY_WINDOW_PREMIUM`) have never
+  Follow-ups, same week: (a) every week in view is now held to *this* week's
+  bar - GW7 had reported "holding 3xc for GW16 (+7.6 xP vs +7.7 now)" because
+  GW16 was judged on its own lower bar (6.6 vs 8.4); `test_chip_commit_bar.py`.
+  (b) free hit is valued per gameweek (#47); **wildcard deliberately stays
+  current-week only**, since its future gain depends on a squad nothing here
+  can know. (c) the watchdog's all-clear now lists unplayed chips and alerts
+  if a window closes over one (#46). **Still open:** the weights behind all of
+  it (`THRESHOLDS`, `EARLY_WINDOW_PREMIUM`, `END_OF_WINDOW_SLACK`) have never
   been backtested.
 - **A season total is not a measurement.** See "the noise floor" above.
 
