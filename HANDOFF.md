@@ -1216,6 +1216,22 @@ Ranked. **1 and 2 are now FIXED; 3 is measured and should not be fixed.**
   `tests/test_recommend_recent_minutes.py` records XPModel's kwargs through
   `recommend.main()`. **Anything new manager.py passes to XPModel or the
   optimiser must be passed here too.**
+- **First-half chips would have lapsed at GW19 unplayed - FIXED 24 Oct.** The
+  commit bar decays only to its base (12/6/15/20), and GW9-19 of 2026-27 has
+  no doubles or blanks, so bench boost (~8 xP) and free hit could never
+  clear it. Walking GW9-19 on sub-bar values played **zero** of four chips.
+  Nothing alerted, because a chip that is never played raises nothing. The
+  test meant to guard this was named "the commit floor falls to nothing at the
+  end of the window" and asserted it fell to 12. `chips_at_risk_of_expiry`
+  now drops the floor to zero once the gameweeks left are no more than the
+  unplayed chips + 1 (GW15 for four chips); `tests/test_chip_expiry.py`.
+  **Still open, not fixed here:** (a) the decaying bar pushes chips later
+  even onto a *lower*-valued week - GW7 held 3xc for GW16 at +7.6 over +7.7
+  now, since GW7's bar was 8.4 and GW16's 6.6; (b) manager.py passes no
+  `best_xi_xp` / `wildcard_gain_by_gw`, so free hit and wildcard are only ever
+  valued for the current gameweek and can never be scheduled ahead. The
+  weights behind all of it (`THRESHOLDS`, `EARLY_WINDOW_PREMIUM`) have never
+  been backtested.
 - **A season total is not a measurement.** See "the noise floor" above.
 
 ## Verified API facts
