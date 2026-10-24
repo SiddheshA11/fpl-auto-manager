@@ -500,6 +500,30 @@ def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = Fals
     # one: the gain a free transfer would have captured anyway is not a reason
     # to spend a wildcard.
     wildcard_gain = wildcard_squad.squad_xp - current.squad_xp
+
+    # Free hit valued in every gameweek the planner can see, not only this one,
+    # so it can be held for its best week - a blank or a double - rather than
+    # judged on this week alone. Each is a one-week squad on that gameweek's own
+    # column. Wildcard stays current-week only, deliberately: its gain in a
+    # future week depends on the squad owned by then, which nothing here knows,
+    # and valuing it on today's squad would be false precision.
+    best_xi_xp: dict[int, float] = {}
+    if "freehit" in chips.available_chips(bootstrap, my_team, event_id):
+        for gw in events:
+            col = f"xp_gw{gw}"
+            if col not in pool.columns:
+                continue
+            try:
+                fh = SquadOptimizer(
+                    pool, value_col=col, captain_col=col,
+                    ownership_weight=tilt.ownership_weight, ownership_col=tilt.ownership_col,
+                    captain_ownership_weight=tilt.captain_weight,
+                ).build_squad(budget=budget)
+            except RuntimeError as e:
+                # A chip valuation is never worth failing the submission over.
+                logger.warning("free hit for GW%d could not be valued (%s); skipping it", gw, e)
+                continue
+            best_xi_xp[gw] = float(fh.xi[col].sum())
     chip_engine = chips.ChipEngine(bootstrap, fixtures, scored)
     decision = chip_engine.evaluate(
         event_id,
@@ -513,6 +537,7 @@ def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = Fals
         # gameweek of the window, not just this one, so a double gameweek two
         # weeks out beats an ordinary week now.
         squad_ids=[int(i) for i in current.squad["id"]],
+        best_xi_xp=best_xi_xp or None,
     )
     logger.info("chip decision: %s (%s)", decision.chip or "none", decision.reason)
 
