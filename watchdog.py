@@ -103,6 +103,19 @@ HEARTBEAT_EVERY_HOURS = 72.0
 # watchdog logged "waiting - GW7 deadline is 166.4h away".
 MISS_ALERT_WINDOW_HOURS = 36.0
 
+# A chip that expires unplayed raises nothing anywhere else: the planner simply
+# never picks it, and on 2026-27's numbers all four first-half chips would have
+# lapsed at GW19 without a line in any log. So the watchdog reports what is
+# still unplayed in every all-clear, and alerts once a window has closed over
+# one - read from the public history endpoint, like everything else here.
+ENTRY_HISTORY_URL = "https://fantasy.premierleague.com/api/entry/{entry_id}/history/"
+CHIP_NAMES = {"wildcard", "freehit", "bboost", "3xc"}
+
+# Grace after the closing deadline before an unplayed chip counts as lapsed, so
+# a chip played on the final gameweek has time to appear in the history
+# endpoint. Two hours is a judgement; the endpoint's lag is not documented.
+CHIP_LAPSE_GRACE_HOURS = 2.0
+
 
 def _parse_int(value: str | None) -> int | None:
     try:
@@ -235,6 +248,67 @@ def assess(events: list[dict], last_submitted_gw: int | None,
     }, missed)
 
 
+def assess_chips(windows: list[dict], events: list[dict],
+                 played: list[tuple[str, int]], now: datetime) -> dict:
+    """
+    Unplayed chips in the open window, and any that a recently closed window
+    let lapse. Pure, like `assess`.
+
+    `windows` is bootstrap["chips"]; `played` is (name, gameweek) from
+    /entry/{id}/history/.
+    """
+    deadlines = {int(e["id"]): ds.parse_deadline(e) for e in events}
+    nxt = ds.next_event(events, now)
+    next_id = int(nxt["id"]) if nxt else None
+
+    def unplayed(w):
+        return not any(n == w["name"] and w["start_event"] <= gw <= w["stop_event"]
+                       for n, gw in played)
+
+    usable = [w for w in windows if w.get("name") in CHIP_NAMES
+              and w.get("start_event") is not None and w.get("stop_event") is not None]
+
+    lapsed = []
+    for w in usable:
+        closed = deadlines.get(int(w["stop_event"]))
+        if closed is None:
+            continue
+        age = (now - closed).total_seconds() / 3600.0
+        if CHIP_LAPSE_GRACE_HOURS <= age <= MISS_ALERT_WINDOW_HOURS and unplayed(w):
+            lapsed.append((w["name"], int(w["stop_event"])))
+
+    open_window = None
+    if next_id is not None:
+        live = [w for w in usable if w["start_event"] <= next_id <= w["stop_event"]]
+        names = sorted(w["name"] for w in live if unplayed(w))
+        if names:
+            stop = min(int(w["stop_event"]) for w in live if w["name"] in names)
+            open_window = {"unplayed": names, "closes": stop, "left": stop - next_id + 1}
+
+    return {"lapsed": sorted(lapsed), "open": open_window}
+
+
+def _chip_line(report: dict | None, error: str | None) -> str:
+    if error:
+        return f"Chips: status unavailable ({error})."
+    w = (report or {}).get("open")
+    if not w:
+        return "Chips: none unplayed in the current window."
+    return (f"Chips: {', '.join(w['unplayed'])} unplayed; window closes GW{w['closes']} "
+            f"({w['left']} gameweek(s) left, one chip per gameweek).")
+
+
+def _memo(fetcher):
+    """Both checks read the bootstrap; fetch it once per run."""
+    cache: dict[str, dict] = {}
+
+    def fetch(url, *a, **kw):
+        if url not in cache:
+            cache[url] = fetcher(url, *a, **kw)
+        return cache[url]
+    return fetch
+
+
 def check_own_lateness(last_heartbeat: datetime | None, now: datetime) -> float | None:
     """Hours late, or None if the watchdog is running roughly on time."""
     if last_heartbeat is None:
@@ -296,6 +370,7 @@ def run(dry_run: bool = False, now: datetime | None = None,
             return {"state": "misconfigured", "alert": True, "trigger": False, "detail": msg}
         gh = GitHubRepo(repo, token)
 
+    fetcher = _memo(fetcher)
     try:
         events = ds.fetch_events(fetcher)
     except Exception as e:  # noqa: BLE001
@@ -309,6 +384,25 @@ def run(dry_run: bool = False, now: datetime | None = None,
     if verdict["trigger"]:
         verdict = _unless_in_flight(verdict, gh)
     logger.info("watchdog: %s (%s)", verdict["state"], verdict["detail"])
+
+    # Never fatal: the deadline check above is the watchdog's real job, and an
+    # unreadable chip status is reported in the all-clear rather than dropped.
+    chip_report, chip_error = None, None
+    entry_id = os.environ.get("FPL_TEAM_ID", "").strip()
+    if not entry_id or entry_id == "0":
+        chip_error = "FPL_TEAM_ID unset"
+    else:
+        try:
+            bootstrap = fetcher(ds.BOOTSTRAP_URL)
+            history = fetcher(ENTRY_HISTORY_URL.format(entry_id=int(entry_id)))
+            played = [(c["name"], int(c["event"])) for c in history.get("chips") or []
+                      if c.get("name") and c.get("event") is not None]
+            chip_report = assess_chips(bootstrap.get("chips") or [], events, played, now)
+        except Exception as e:  # noqa: BLE001 - see above
+            chip_error = f"{type(e).__name__}: {e}"
+            logger.warning("could not read chip status: %s", chip_error)
+    if chip_report and chip_report["lapsed"]:
+        logger.error("chips lapsed unplayed: %s", chip_report["lapsed"])
 
     last_heartbeat = _parse_ts(gh.get_variable(HEARTBEAT_VARIABLE))
     late_by = check_own_lateness(last_heartbeat, now)
@@ -325,6 +419,10 @@ def run(dry_run: bool = False, now: datetime | None = None,
     messages = []
     if verdict["alert"]:
         messages.append(_format_alert(verdict, repo, triggered))
+    if chip_report and chip_report["lapsed"]:
+        lost = ", ".join(f"{n} (GW{gw})" for n, gw in chip_report["lapsed"])
+        messages.append(f"*FPL deadline watchdog*\n\nChip window closed with chips unplayed: "
+                        f"{lost}. They are gone; check why the planner never committed them.")
     if late_by is not None:
         messages.append(f"*FPL deadline watchdog*\n\nThe watchdog itself ran {late_by:.1f}h "
                         f"after its previous run; it is scheduled every {EXPECTED_INTERVAL_HOURS:.0f}h. "
@@ -336,8 +434,10 @@ def run(dry_run: bool = False, now: datetime | None = None,
                      (now - last_heartbeat).total_seconds() / 3600.0 >= HEARTBEAT_EVERY_HOURS)
     # Never an all-clear over a gameweek that was dropped, even once the miss
     # is too old to alert on. Silence is bad; a false clean bill is worse.
-    if due_heartbeat and not verdict["alert"] and not verdict.get("missed_event"):
-        messages.append(f"*FPL deadline watchdog*\n\nAll clear. {verdict['detail']}.")
+    chips_lapsed = bool(chip_report and chip_report["lapsed"])
+    if due_heartbeat and not verdict["alert"] and not verdict.get("missed_event") and not chips_lapsed:
+        messages.append(f"*FPL deadline watchdog*\n\nAll clear. {verdict['detail']}.\n"
+                        f"{_chip_line(chip_report, chip_error)}")
 
     if not dry_run:
         for m in messages:
@@ -350,6 +450,7 @@ def run(dry_run: bool = False, now: datetime | None = None,
             logger.info("[dry run] would send:\n%s", m)
 
     verdict["triggered"] = triggered
+    verdict["chips"] = chip_report if chip_error is None else {"error": chip_error}
     verdict["late_by_hours"] = late_by
     return verdict
 
