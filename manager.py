@@ -328,22 +328,13 @@ def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = Fals
     logger.info("Team ID: %s | dry run: %s", FPL_TEAM_ID, dry_run)
     logger.info("=" * 60)
 
-    logger.info("STEP 1: authenticating")
-    login_ok = client.login()
-    # Before the login check: a rotation can fail and the login still be
-    # refused, and either way the human has to act before the next deadline.
-    # Alerted now rather than at the end, so a crash later cannot swallow it.
-    if getattr(client, "rotation_failed", False):
-        _alert_rotation_failed()
-    if not login_ok:
-        logger.critical("authentication failed; aborting")
-        return None
-
-    logger.info("STEP 2: loading game state")
-    bootstrap = client.get_bootstrap()
-    fixtures_df = client.get_fixtures()
-    fixtures = fixtures_df.to_dict("records") if isinstance(fixtures_df, pd.DataFrame) else fixtures_df
-
+    # Everything that can end this run as a no-op is decided BEFORE logging
+    # in, from the public bootstrap. A login spends the single-use refresh
+    # token, so a run that was always going to do nothing must not touch it.
+    # On 31 Oct the watchdog's backup dispatch logged in with a token the
+    # scheduled run had rotated a minute earlier, failed, and raised a
+    # "weekly run failed" alert over a team that was already submitted -
+    # when the marker it checked only after logging in said GW9 was done.
     next_event = client.get_next_event()
     if not next_event:
         logger.warning("no upcoming gameweek; season may be over")
@@ -399,6 +390,22 @@ def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = Fals
             return {"status": "skipped", "event_id": event_id, "lead_hours": lead}
         else:
             logger.info("GW%d deadline is %.1fh away; proceeding", event_id, lead)
+
+    logger.info("STEP 1: authenticating")
+    login_ok = client.login()
+    # Before the login check: a rotation can fail and the login still be
+    # refused, and either way the human has to act before the next deadline.
+    # Alerted now rather than at the end, so a crash later cannot swallow it.
+    if getattr(client, "rotation_failed", False):
+        _alert_rotation_failed()
+    if not login_ok:
+        logger.critical("authentication failed; aborting")
+        return None
+
+    logger.info("STEP 2: loading game state")
+    bootstrap = client.get_bootstrap()
+    fixtures_df = client.get_fixtures()
+    fixtures = fixtures_df.to_dict("records") if isinstance(fixtures_df, pd.DataFrame) else fixtures_df
 
     my_team = client.get_my_team()
     if not my_team:

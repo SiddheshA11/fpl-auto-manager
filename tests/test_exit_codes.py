@@ -31,6 +31,7 @@ class _StubClient:
         self.my_team_calls = 0
 
     def login(self):
+        self.login_calls = getattr(self, "login_calls", 0) + 1
         return self._login_ok
 
     def get_bootstrap(self):
@@ -86,10 +87,20 @@ def test_the_skip_is_distinguishable_from_a_submission(monkeypatch):
 
 
 def test_a_real_failure_still_exits_one(monkeypatch):
-    """The fix must not turn genuine breakage green."""
+    """
+    The fix must not turn genuine breakage green. In the window, because a
+    run outside it now stops before logging in and never meets the failure.
+    """
     code, _ = _run(monkeypatch, ["manager.py", "--respect-window"],
-                   lead_hours=164.5, login_ok=False)
+                   lead_hours=5.0, login_ok=False)
     assert code == 1, "authentication failure must still be a failed run"
+
+
+def test_a_skip_never_logs_in(monkeypatch):
+    """A login spends the single-use refresh token; a no-op must not."""
+    code, stub = _run(monkeypatch, ["manager.py", "--respect-window"], lead_hours=164.5)
+    assert code == 0
+    assert getattr(stub, "login_calls", 0) == 0, "an out-of-window run logged in"
 
 
 def test_no_upcoming_gameweek_still_exits_one(monkeypatch):
