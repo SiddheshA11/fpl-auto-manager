@@ -33,10 +33,14 @@ SEASON = _events(
 
 
 class _FakeGitHub:
-    def __init__(self, variables=None, dispatch_ok=True):
+    def __init__(self, variables=None, dispatch_ok=True, active=0):
         self.variables = dict(variables or {})
         self.dispatched = []
         self._dispatch_ok = dispatch_ok
+        self._active = active
+
+    def active_runs(self, workflow):
+        return self._active
 
     def get_variable(self, name):
         return self.variables.get(name)
@@ -281,6 +285,9 @@ class _FailingVariableWrite:
     def dispatch_workflow(self, *a, **k):
         return True
 
+    def active_runs(self, workflow):
+        return 0
+
 
 def test_a_failed_marker_write_alerts_rather_than_warning(monkeypatch):
     import manager
@@ -324,3 +331,45 @@ def test_a_local_run_without_credentials_neither_writes_nor_alerts(monkeypatch):
     manager._record_submission(7)
 
     assert spy.sent == []
+
+
+# ------------------------------------------ a weekly run already in flight
+#
+# 31 Oct 2026: the weekly run started at 08:14:10 with GW9 2.8h out; the
+# watchdog arrived at 08:14:35 - same scheduler - read the marker before the
+# run had written it, alerted "overdue" and dispatched a backup run, which
+# failed on a token the first run had just rotated.
+
+GW9 = datetime(2026, 10, 31, 11, 0, tzinfo=timezone.utc)
+GW9_SEASON = [{"id": 8, "deadline_time": "2026-10-23T17:30:00Z", "finished": True},
+              {"id": 9, "deadline_time": "2026-10-31T11:00:00Z", "finished": False}]
+GW9_WATCHDOG_ARRIVAL = datetime(2026, 10, 31, 8, 14, 35, tzinfo=timezone.utc)
+
+
+def test_the_31_oct_race_neither_alerts_nor_dispatches(monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    gh, notes = _FakeGitHub({watchdog.MARKER_VARIABLE: "8"}, active=1), _SpyNotifier()
+    v = watchdog.run(now=GW9_WATCHDOG_ARRIVAL, gh=gh, notifier=notes,
+                     fetcher=_fetcher(GW9_SEASON))
+    assert v["state"] == "in-progress"
+    assert gh.dispatched == [], "a backup run was dispatched over one already submitting"
+    assert not any("overdue" in m.lower() for m in notes.sent)
+
+
+def test_with_nothing_in_flight_the_same_moment_still_dispatches(monkeypatch):
+    """Guards the other direction: the stand-down must not mask a real miss."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    gh = _FakeGitHub({watchdog.MARKER_VARIABLE: "8"}, active=0)
+    v = watchdog.run(now=GW9_WATCHDOG_ARRIVAL, gh=gh, notifier=_SpyNotifier(),
+                     fetcher=_fetcher(GW9_SEASON))
+    assert v["state"] == "overdue" and len(gh.dispatched) == 1
+
+
+def test_if_github_cannot_say_whether_a_run_is_active_it_still_alerts(monkeypatch):
+    """A spurious alert is cheap; a suppressed real one is the failure."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", "o/r")
+    gh = _FakeGitHub({watchdog.MARKER_VARIABLE: "8"}, active=None)
+    v = watchdog.run(now=GW9_WATCHDOG_ARRIVAL, gh=gh, notifier=_SpyNotifier(),
+                     fetcher=_fetcher(GW9_SEASON))
+    assert v["state"] == "overdue" and len(gh.dispatched) == 1
+
