@@ -257,6 +257,27 @@ def _format_alert(verdict: dict, repo: str, triggered: bool | None) -> str:
     return "\n".join(lines)
 
 
+def _unless_in_flight(verdict: dict, gh) -> dict:
+    """
+    An unset marker is not a missed gameweek while a weekly run is still
+    working: the marker is written only once the team is in. On 31 Oct the
+    watchdog and the weekly run arrived 25 seconds apart - same scheduler -
+    and the watchdog read the marker mid-submission, alerted that GW9 was
+    overdue and dispatched a second run that failed on a just-rotated token.
+
+    If GitHub cannot say whether a run is active, the verdict stands: a
+    spurious alert is cheap, a suppressed real one is the failure this whole
+    file exists to prevent. A run in flight cannot mask a miss for long - the
+    weekly run times out at 15 minutes and this re-checks every hour.
+    """
+    active = gh.active_runs(WORKFLOW_TO_TRIGGER)
+    if not active:
+        return verdict
+    return {**verdict, "state": "in-progress", "alert": False, "trigger": False,
+            "detail": f"{verdict['detail']}; a weekly run is in progress ({active} active), "
+                      "so not alerting or dispatching yet"}
+
+
 def run(dry_run: bool = False, now: datetime | None = None,
         gh: GitHubRepo | None = None, notifier=None,
         fetcher=ds._fetch) -> dict:
@@ -285,6 +306,8 @@ def run(dry_run: bool = False, now: datetime | None = None,
 
     last_submitted = _parse_int(gh.get_variable(MARKER_VARIABLE))
     verdict = assess(events, last_submitted, now)
+    if verdict["trigger"]:
+        verdict = _unless_in_flight(verdict, gh)
     logger.info("watchdog: %s (%s)", verdict["state"], verdict["detail"])
 
     last_heartbeat = _parse_ts(gh.get_variable(HEARTBEAT_VARIABLE))

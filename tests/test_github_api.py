@@ -167,3 +167,19 @@ def test_the_weekly_run_refuses_on_a_marker_github_cannot_serve(api, monkeypatch
     monkeypatch.setattr(manager, "_github", lambda: api.repo)
     assert manager._marker_gameweek(sleep=lambda s: None) is manager.MARKER_UNKNOWN
     assert len(api.requests) == manager.MARKER_READ_ATTEMPTS
+
+
+RUNS = "/repos/o/r/actions/workflows/weekly_run.yml/runs?status={}&per_page=1"
+
+
+def test_active_runs_sums_every_unfinished_status(api):
+    for status, n in zip(github_api.GitHubRepo.ACTIVE_RUN_STATUSES, (0, 1, 1, 0, 0)):
+        api.on("GET", RUNS.format(status), (200, {"total_count": n}))
+    assert api.repo.active_runs("weekly_run.yml") == 2
+
+
+def test_active_runs_is_unknown_not_zero_when_github_fails(api):
+    """Zero would tell the watchdog to stand down; unknown keeps it alerting."""
+    api.on("GET", RUNS.format("queued"), (200, {"total_count": 0}))
+    api.on("GET", RUNS.format("in_progress"), (502, {}))
+    assert api.repo.active_runs("weekly_run.yml") is None

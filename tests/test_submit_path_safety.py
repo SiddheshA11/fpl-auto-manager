@@ -133,16 +133,64 @@ def test_an_absent_marker_still_proceeds(monkeypatch, sent):
 # ------------------------------------------------------------- the rotation
 
 class _RotationFailed(_StubClient):
-    rotation_failed = True
+    """The flag is set by logging in, as FPLClient sets it - not before."""
+
+    def login(self):
+        self.rotation_failed = True
+        return super().login()
 
 
-def test_a_failed_rotation_alerts_and_fails_even_a_healthy_skip(monkeypatch, sent):
-    stub = _RotationFailed(lead_hours=164.5)
-    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
-    monkeypatch.setattr(manager, "_github", lambda: None)
-    monkeypatch.setattr(sys, "argv", ["manager.py", "--respect-window"])
+def test_a_failed_rotation_alerts_and_fails_a_run_that_submitted(game_state, monkeypatch, sent):
+    """
+    The run still submits with the access token it holds, then fails the job.
+    Driven through a real submission so the exit code is the rotation's, not
+    an abort's. (It used to be shown on an out-of-window skip; a skip no
+    longer logs in, so it can no longer spend or fail a rotation.)
+    """
+    bootstrap, fixtures = game_state
+    owned, costs = _squad_and_costs(bootstrap, fixtures)
+
+    class RotatingClient(StubClient):
+        def login(self):
+            self.rotation_failed = True
+            return super().login()
+
+    client = RotatingClient(bootstrap, fixtures, owned, costs)
+    monkeypatch.setattr(manager, "FPLClient", lambda: client)
+    monkeypatch.setattr(manager, "_github", lambda: _Repo((True, None)))
+    monkeypatch.setattr(sys, "argv", ["manager.py"])
     assert manager.main() == 1, "a spent token exited 0 green"
+    assert client.submitted_lineup is not None, "the team must still go in"
     assert any("ROTATION FAILED" in m for m in sent.messages)
+
+
+def test_an_already_submitted_dispatch_never_logs_in(monkeypatch, sent):
+    """
+    31 Oct, the backup run: dispatched (no window), GW9 already marked. It
+    logged in with a token rotated a minute earlier, failed, and alerted
+    over a submitted team. Now it stops at the marker and exits 0.
+    """
+    stub = _StubClient(lead_hours=2.7)
+    calls = []
+    stub.login = lambda: calls.append(1) or True
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    monkeypatch.setattr(manager, "_github", lambda: _Repo((True, "3")))
+    monkeypatch.setattr(sys, "argv", ["manager.py"])
+    assert manager.main() == 0
+    assert calls == [], "a run with nothing to do logged in"
+    assert sent.messages == []
+
+
+def test_an_unreadable_marker_refuses_before_logging_in(monkeypatch, sent):
+    stub = _StubClient(lead_hours=2.7)
+    calls = []
+    stub.login = lambda: calls.append(1) or True
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    monkeypatch.setattr(manager, "_github", lambda: _Repo(*[(False, None)] * 3))
+    monkeypatch.setattr(manager, "MARKER_RETRY_SECONDS", 0.0)
+    monkeypatch.setattr(sys, "argv", ["manager.py"])
+    assert manager.main() == 1
+    assert calls == []
 
 
 def test_a_failed_rotation_is_reported_on_a_refused_login_too(monkeypatch, sent):

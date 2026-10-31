@@ -145,6 +145,22 @@ class GitHubRepo:
         logger.warning("could not create branch %s: %s %s", branch, status, body.get("message",""))
         return False
 
+    # Every status GitHub uses for a run that has not finished. "pending" is a
+    # run waiting on a concurrency group, which is exactly where a second
+    # weekly run sits while the first is submitting.
+    ACTIVE_RUN_STATUSES = ("queued", "in_progress", "pending", "waiting", "requested")
+
+    def active_runs(self, workflow: str) -> int | None:
+        """Unfinished runs of `workflow`, or None if GitHub could not say."""
+        total = 0
+        for status in self.ACTIVE_RUN_STATUSES:
+            code, body = self._api(f"/actions/workflows/{workflow}/runs?status={status}&per_page=1")
+            if code != 200:
+                logger.warning("could not list %s runs (%s): status %s", workflow, status, code)
+                return None
+            total += int(body.get("total_count", 0))
+        return total
+
     def dispatch_workflow(self, workflow: str, ref: str = "main", inputs: dict | None = None) -> bool:
         status, body = self._api(f"/actions/workflows/{workflow}/dispatches", "POST",
                                  {"ref": ref, "inputs": inputs or {}})
