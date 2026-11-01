@@ -505,13 +505,19 @@ class ChipEngine:
         # valuable chip scheduled elsewhere. Filtering the options first means
         # every assignment the solver can reach is one worth committing to, and
         # it maximises total gain across them.
+        #
+        # Every week is held to THIS week's bar, not its own. The question is
+        # whether to commit now; judged against its own decayed bar a later
+        # week could enter the plan on a value that would not justify committing
+        # today - GW7 "held" 3xc for a GW16 worth less than GW7 itself, purely
+        # because GW16's bar was lower.
         expiring = chips_at_risk_of_expiry(self.bootstrap, avail, event)
         if expiring:
             logger.info("chip window closing: %s must be played or lost; any positive gain commits",
                         ", ".join(sorted(expiring)))
         committable = {
             (chip, gw): gain for (chip, gw), gain in values.items()
-            if gain >= effective_threshold(self.bootstrap, chip, gw)
+            if gain >= effective_threshold(self.bootstrap, chip, event)
             or (chip in expiring and gain > 0)
         }
 
@@ -535,7 +541,7 @@ class ChipEngine:
                 )
             best = max(values.items(), key=lambda kv: kv[1], default=None)
             if best:
-                bar = effective_threshold(self.bootstrap, best[0][0], best[0][1])
+                bar = effective_threshold(self.bootstrap, best[0][0], event)
                 detail = (f"best was {best[0][0]} at {best[1]:.1f} xP in GW{best[0][1]}, "
                           f"under its {bar:.1f} bar")
             else:
