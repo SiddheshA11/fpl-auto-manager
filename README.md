@@ -60,8 +60,6 @@ Go to your repo → **Settings** → **Secrets and variables** → **Actions** �
 | `FPL_REFRESH_TOKEN` | ✅ Recommended | Refresh token (lasts ~30 days) |
 | `FPL_TEAM_ID` | ✅ Required | Your Team ID |
 | `FPL_COOKIE` | Optional | Full cookie string (fallback) |
-| `FPL_EMAIL` | Optional | FPL email (legacy fallback) |
-| `FPL_PASSWORD` | Optional | FPL password (legacy fallback) |
 
 > **💡 Tip**: Use `FPL_REFRESH_TOKEN` — it lasts 30 days vs 8 hours for cookies. You'll get a GitHub issue reminder monthly to refresh it.
 

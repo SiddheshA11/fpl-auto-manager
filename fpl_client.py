@@ -8,8 +8,8 @@ import logging
 import requests
 import pandas as pd
 from config import (
-    FPL_EMAIL, FPL_PASSWORD, FPL_TEAM_ID, FPL_COOKIE, FPL_REFRESH_TOKEN,
-    ENDPOINTS, STRATEGY, LOGIN_URL, PINGONE_TOKEN_URL, PINGONE_CLIENT_ID,
+    FPL_TEAM_ID, FPL_COOKIE, FPL_REFRESH_TOKEN,
+    ENDPOINTS, STRATEGY, PINGONE_TOKEN_URL, PINGONE_CLIENT_ID,
 )
 
 logger = logging.getLogger("fpl_auto")
@@ -68,6 +68,10 @@ class FPLClient:
         self.authenticated = False
         # Set when a rotated token could not be persisted; the caller surfaces it.
         self.rotation_failed = False
+        # Set when the auth server refuses the stored refresh token outright
+        # (invalid_grant). Nothing short of a human issuing a new token fixes
+        # that, so the caller alerts with the remedy instead of "will retry".
+        self.refresh_token_rejected = False
         self._bootstrap_cache = None
         self._fixtures_cache = None
 
@@ -78,9 +82,13 @@ class FPLClient:
         Authenticate with FPL.
         
         Priority order:
-        1. Cookie-based (extracts access_token from cookie string) - reliable
-        2. Refresh token (with token rotation) - single-use, less reliable
-        3. Email/password (legacy, may not work)
+        1. Cookie-based (extracts access_token from cookie string)
+        2. Refresh token (with token rotation)
+
+        There is no email/password path any more. It posted to
+        users.premierleague.com, which no longer resolves, so it could only
+        ever fail - and it did so after every refused refresh token from GW9 to
+        GW11, burying the one log line that said what was actually wrong.
         """
         # Method 1: Cookie-based authentication (most reliable)
         if FPL_COOKIE:
@@ -96,13 +104,15 @@ class FPLClient:
                 return True
             logger.warning("Token refresh failed...")
         
-        # Method 3: Email/Password (may fail due to FPL's 2024 auth changes)
-        if FPL_EMAIL and FPL_PASSWORD:
-            logger.info("Using email/password authentication...")
-            return self._login_with_credentials()
-        
-        logger.error("No authentication credentials provided. "
-                    "Set FPL_COOKIE (recommended) or FPL_REFRESH_TOKEN.")
+        if self.refresh_token_rejected:
+            logger.critical(
+                "FPL refused the stored FPL_REFRESH_TOKEN (invalid_grant). It is dead and "
+                "no run can log in until a new one is issued by hand: log in to FPL in a "
+                "browser, copy a fresh refresh token, and update the FPL_REFRESH_TOKEN secret."
+            )
+        elif not (FPL_COOKIE or FPL_REFRESH_TOKEN):
+            logger.error("No authentication credentials provided. "
+                         "Set FPL_REFRESH_TOKEN (or FPL_COOKIE).")
         return False
 
     def _refresh_access_token(self) -> bool:
@@ -161,6 +171,13 @@ class FPLClient:
                         return False
                         
             logger.error(f"Token refresh failed: {resp.status_code} - {resp.text[:200]}")
+            # invalid_grant is final: the token was revoked, expired or already
+            # spent. Every run from 31 Oct on was refused this way, most likely
+            # because run 395 presented the pre-rotation token a minute after
+            # run 394 had rotated it, and the server revoked the whole token
+            # chain. Anything else (5xx, timeouts) may be transient.
+            if resp.status_code in (400, 401) and "invalid_grant" in resp.text:
+                self.refresh_token_rejected = True
             return False
             
         except Exception as e:
@@ -288,56 +305,6 @@ class FPLClient:
                 
         except Exception as e:
             logger.error(f"Authentication failed: {e}")
-            return False
-
-    def _login_with_credentials(self) -> bool:
-        """
-        Authenticate with email/password.
-        Note: This may not work due to FPL's 2024 authentication changes.
-        Use cookie-based auth instead.
-        """
-        try:
-            # Get the login page first
-            login_page = self.session.get(LOGIN_URL)
-            
-            # Submit credentials
-            payload = {
-                "login": FPL_EMAIL,
-                "password": FPL_PASSWORD,
-                "redirect_uri": "https://fantasy.premierleague.com/",
-                "app": "plfpl-web",
-            }
-            
-            headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": LOGIN_URL,
-            }
-            
-            resp = self.session.post(LOGIN_URL, data=payload, headers=headers, 
-                                    allow_redirects=True)
-            
-            # Check for pl_profile cookie
-            cookies = self.session.cookies.get_dict()
-            if "pl_profile" in cookies:
-                # Verify with API call
-                verify_url = ENDPOINTS["my_team"].format(manager_id=FPL_TEAM_ID)
-                verify_resp = self.session.get(verify_url)
-                
-                if verify_resp.status_code == 200:
-                    self.authenticated = True
-                    logger.info("Successfully authenticated with email/password.")
-                    return True
-            
-            logger.error("Email/password authentication failed. "
-                        "This is likely due to FPL's 2024 auth changes. "
-                        "Please use cookie-based authentication instead.")
-            logger.error("To get cookies: Log in to FPL in your browser, open DevTools (F12), "
-                        "go to Network tab, find any request to fantasy.premierleague.com, "
-                        "copy the Cookie header value, and set it as FPL_COOKIE secret.")
-            return False
-            
-        except Exception as e:
-            logger.error(f"Email/password authentication failed: {e}")
             return False
 
     def _get(self, url: str, auth_required: bool = False) -> dict | list | None:

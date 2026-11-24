@@ -321,6 +321,17 @@ def _alert_rotation_failed() -> None:
     )
 
 
+def _alert_refresh_token_rejected() -> None:
+    # The workflow's generic failure message says the watchdog will retry.
+    # For a refused token that is false: every retry is refused the same way,
+    # which is how GW10 and GW11 were lost with an alert that read as routine.
+    notify.from_env().send(
+        "*FPL weekly run*\n\nFPL refused the stored `FPL_REFRESH_TOKEN`. It is dead, "
+        "and no run (scheduled, watchdog or manual) can log in until you set a new one "
+        "by hand in the repo's Actions secrets. Nothing will be submitted until then."
+    )
+
+
 def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = False,
                       max_hits: int = 2, force: bool = False) -> dict | None:
     logger.info("=" * 60)
@@ -400,6 +411,8 @@ def _run_weekly_cycle(client, dry_run: bool = False, respect_window: bool = Fals
         _alert_rotation_failed()
     if not login_ok:
         logger.critical("authentication failed; aborting")
+        if getattr(client, "refresh_token_rejected", False):
+            _alert_refresh_token_rejected()
         return None
 
     logger.info("STEP 2: loading game state")

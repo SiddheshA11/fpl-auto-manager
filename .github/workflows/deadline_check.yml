@@ -51,8 +51,6 @@ jobs:
 
       - name: Run deadline check
         env:
-          FPL_EMAIL: ${{ secrets.FPL_EMAIL }}
-          FPL_PASSWORD: ${{ secrets.FPL_PASSWORD }}
           FPL_TEAM_ID: ${{ secrets.FPL_TEAM_ID }}
           FPL_COOKIE: ${{ secrets.FPL_COOKIE }}
           FPL_REFRESH_TOKEN: ${{ secrets.FPL_REFRESH_TOKEN }}
