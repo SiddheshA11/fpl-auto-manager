@@ -117,3 +117,38 @@ def test_every_outbound_call_sets_a_timeout(monkeypatch):
 
     FPLClient()._update_github_secret("FPL_REFRESH_TOKEN", "x")
     assert seen and all(t is not None for t in seen), "requests must pass a timeout"
+
+
+def _refused(monkeypatch, status=400, text='{"error" : "invalid_grant", '
+             '"error_description" : "Refresh token does not exist"}'):
+    monkeypatch.setattr(fpl_client.requests, "post", lambda *a, **k: _Response(status, text=text))
+
+
+def test_refused_refresh_token_is_flagged(client, monkeypatch):
+    """invalid_grant is final, and the caller must be able to say so."""
+    _refused(monkeypatch)
+    assert client._refresh_access_token() is False
+    assert client.refresh_token_rejected is True
+
+
+def test_transient_refresh_failure_is_not_flagged_as_dead(client, monkeypatch):
+    _refused(monkeypatch, status=503, text="upstream unavailable")
+    assert client._refresh_access_token() is False
+    assert client.refresh_token_rejected is False
+
+
+def test_refused_token_login_fails_with_the_remedy_and_tries_nothing_else(client, monkeypatch, caplog):
+    """
+    Regression: after a refused token, login fell through to an email/password
+    path on users.premierleague.com, a host that no longer resolves. GW10 and
+    GW11 each ended on that DNS error instead of on the refused token.
+    """
+    monkeypatch.setattr(fpl_client, "FPL_COOKIE", "")
+    _refused(monkeypatch)
+    client.session.get = lambda *a, **k: pytest.fail("no other login path may be tried")
+    client.session.post = lambda *a, **k: pytest.fail("no other login path may be tried")
+
+    with caplog.at_level(logging.CRITICAL, logger="fpl_auto"):
+        assert client.login() is False
+    assert "FPL_REFRESH_TOKEN" in caplog.text
+    assert not hasattr(client, "_login_with_credentials")

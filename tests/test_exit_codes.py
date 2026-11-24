@@ -119,3 +119,30 @@ def test_in_window_the_run_proceeds_past_the_check(monkeypatch):
     out = manager.run_weekly_cycle(respect_window=True)
     assert stub.my_team_calls == 1, "an in-window run must get as far as fetching the squad"
     assert out is None  # the stub squad is None, which is a real abort
+
+
+def test_a_refused_token_alerts_with_the_remedy(monkeypatch):
+    """
+    GW10 and GW11 were lost to a dead refresh token while the only alert said
+    the watchdog would retry. A refused token needs a human, so the alert must
+    say that - and a login failure for any other reason must not claim it.
+    """
+    sent = []
+
+    class _Notifier:
+        def send(self, text):
+            sent.append(text)
+
+    monkeypatch.setattr(manager.notify, "from_env", lambda: _Notifier())
+
+    stub = _StubClient(5.0, login_ok=False)
+    stub.refresh_token_rejected = True
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    assert manager.run_weekly_cycle(respect_window=True) is None
+    assert len(sent) == 1 and "FPL_REFRESH_TOKEN" in sent[0]
+
+    sent.clear()
+    stub = _StubClient(5.0, login_ok=False)
+    monkeypatch.setattr(manager, "FPLClient", lambda *a, **k: stub)
+    assert manager.run_weekly_cycle(respect_window=True) is None
+    assert sent == []

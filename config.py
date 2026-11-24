@@ -5,8 +5,6 @@ All settings and strategy parameters live here.
 import os
 
 # ─── FPL Credentials (from environment / GitHub Secrets) ───
-FPL_EMAIL = os.environ.get("FPL_EMAIL", "")
-FPL_PASSWORD = os.environ.get("FPL_PASSWORD", "")
 FPL_TEAM_ID = int(os.environ.get("FPL_TEAM_ID", "0"))
 # Cookie-based auth (workaround for FPL's 2024 auth changes)
 # Extract the full cookie string from your browser after logging in
@@ -29,7 +27,6 @@ PINGONE_TOKEN_URL = OAUTH_TOKEN_URL
 
 # ─── API Endpoints ───
 BASE_URL = "https://fantasy.premierleague.com/api"
-LOGIN_URL = "https://users.premierleague.com/accounts/login/"
 
 ENDPOINTS = {
     "bootstrap": f"{BASE_URL}/bootstrap-static/",
